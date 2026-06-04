@@ -84,8 +84,38 @@ impl MftRecordHeader {
     /// [`NtfsError::TooShort`] if `buf` is smaller than the header, or
     /// [`NtfsError::BadRecordSignature`] for an unrecognised signature.
     pub fn parse(buf: &[u8]) -> Result<MftRecordHeader> {
-        let _ = (buf, off::SIGNATURE, SIGNATURE_FILE);
-        todo!("MFT record header parse — GREEN step")
+        if buf.len() < HEADER_LEN {
+            return Err(NtfsError::TooShort {
+                what: "MFT record header",
+                need: HEADER_LEN,
+                got: buf.len(),
+            });
+        }
+
+        let signature: [u8; 4] = buf[off::SIGNATURE..off::SIGNATURE + 4].try_into().unwrap();
+        if signature != SIGNATURE_FILE && signature != SIGNATURE_BAAD {
+            return Err(NtfsError::BadRecordSignature(signature));
+        }
+
+        let u16at = |o: usize| u16::from_le_bytes(buf[o..o + 2].try_into().unwrap());
+        let u32at = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
+        let u64at = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
+
+        Ok(MftRecordHeader {
+            signature,
+            usa_offset: u16at(off::USA_OFFSET),
+            usa_count: u16at(off::USA_COUNT),
+            lsn: u64at(off::LSN),
+            sequence_number: u16at(off::SEQUENCE_NUMBER),
+            hard_link_count: u16at(off::HARD_LINK_COUNT),
+            first_attribute_offset: u16at(off::FIRST_ATTRIBUTE),
+            flags: u16at(off::FLAGS),
+            used_size: u32at(off::USED_SIZE),
+            allocated_size: u32at(off::ALLOCATED_SIZE),
+            base_record: u64at(off::BASE_RECORD),
+            next_attr_id: u16at(off::NEXT_ATTR_ID),
+            record_number: u32at(off::RECORD_NUMBER),
+        })
     }
 }
 
@@ -100,8 +130,66 @@ impl MftRecordHeader {
 /// write / tampering), or [`NtfsError::BadUpdateSequence`] when the USA is
 /// malformed.
 pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<()> {
-    let _ = (buf, sector_size);
-    todo!("update-sequence-array fixup — GREEN step")
+    if buf.len() < HEADER_LEN {
+        return Err(NtfsError::TooShort {
+            what: "MFT record",
+            need: HEADER_LEN,
+            got: buf.len(),
+        });
+    }
+    if sector_size < 2 {
+        return Err(NtfsError::BadUpdateSequence(
+            "sector size smaller than 2 bytes",
+        ));
+    }
+
+    let usa_offset = u16::from_le_bytes(
+        buf[off::USA_OFFSET..off::USA_OFFSET + 2]
+            .try_into()
+            .unwrap(),
+    ) as usize;
+    let usa_count =
+        u16::from_le_bytes(buf[off::USA_COUNT..off::USA_COUNT + 2].try_into().unwrap()) as usize;
+    if usa_count == 0 {
+        return Err(NtfsError::BadUpdateSequence("usa_count is zero"));
+    }
+
+    // The USA holds `usa_count` u16 entries (1 USN + one original per sector).
+    let usa_end = usa_offset
+        .checked_add(usa_count * 2)
+        .ok_or(NtfsError::BadUpdateSequence("usa offset/count overflow"))?;
+    if usa_end > buf.len() {
+        return Err(NtfsError::BadUpdateSequence("usa extends past record"));
+    }
+
+    let fixup_sectors = usa_count - 1;
+    let span = fixup_sectors
+        .checked_mul(sector_size)
+        .ok_or(NtfsError::BadUpdateSequence("sector span overflow"))?;
+    if span > buf.len() {
+        return Err(NtfsError::BadUpdateSequence(
+            "fixup sectors exceed record size",
+        ));
+    }
+
+    let usn = u16::from_le_bytes(buf[usa_offset..usa_offset + 2].try_into().unwrap());
+
+    for i in 0..fixup_sectors {
+        let tail = (i + 1) * sector_size - 2;
+        let found = u16::from_le_bytes([buf[tail], buf[tail + 1]]);
+        if found != usn {
+            return Err(NtfsError::FixupMismatch {
+                sector: i,
+                expected: usn,
+                found,
+            });
+        }
+        let original = usa_offset + 2 + i * 2;
+        buf[tail] = buf[original];
+        buf[tail + 1] = buf[original + 1];
+    }
+
+    Ok(())
 }
 
 #[cfg(test)]
@@ -111,7 +199,11 @@ mod tests {
     /// Build a `FILE` record with a valid USA: `usn` written to each sector
     /// tail, the `originals` stored in the USA. One original per sector.
     fn make_record(size: usize, sector_size: usize, usn: u16, originals: &[u16]) -> Vec<u8> {
-        assert_eq!(size / sector_size, originals.len(), "one original per sector");
+        assert_eq!(
+            size / sector_size,
+            originals.len(),
+            "one original per sector"
+        );
         let mut b = vec![0u8; size];
         b[0..4].copy_from_slice(b"FILE");
         let usa_offset: u16 = 0x30;
@@ -229,7 +321,11 @@ mod tests {
         b[1022..1024].copy_from_slice(&0xDEADu16.to_le_bytes());
         assert!(matches!(
             apply_fixup(&mut b, 512),
-            Err(NtfsError::FixupMismatch { sector: 1, expected: 0xABCD, found: 0xDEAD })
+            Err(NtfsError::FixupMismatch {
+                sector: 1,
+                expected: 0xABCD,
+                found: 0xDEAD
+            })
         ));
     }
 
