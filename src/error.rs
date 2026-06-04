@@ -31,6 +31,23 @@ pub enum NtfsError {
     #[error("invalid index record size encoding: byte {0:#04x}")]
     BadIndexRecordSize(u8),
 
+    /// An MFT record's signature was neither `FILE` nor `BAAD`.
+    #[error("bad MFT record signature: {0:x?} (expected \"FILE\" or \"BAAD\")")]
+    BadRecordSignature([u8; 4]),
+
+    /// An update-sequence fixup did not match the Update Sequence Number — the
+    /// record was torn across a sector boundary, or has been tampered with.
+    #[error("fixup mismatch in sector {sector}: expected USN {expected:#06x}, found {found:#06x}")]
+    FixupMismatch {
+        sector: usize,
+        expected: u16,
+        found: u16,
+    },
+
+    /// The update sequence array is malformed (offset/count out of bounds).
+    #[error("malformed update sequence array: {0}")]
+    BadUpdateSequence(&'static str),
+
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

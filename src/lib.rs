@@ -19,6 +19,8 @@
 
 pub mod boot;
 pub mod error;
+pub mod record;
 
 pub use boot::BootSector;
 pub use error::{NtfsError, Result};
+pub use record::{apply_fixup, MftRecordHeader};
