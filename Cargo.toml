@@ -1,0 +1,20 @@
+[package]
+name = "ntfs-forensic"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Forensic-grade, from-scratch NTFS filesystem reader — MFT, attributes, indexes, data runs, and deleted/slack/anti-forensic recovery over any Read + Seek source"
+repository = "https://github.com/SecurityRonin/ntfs-forensic"
+keywords = ["forensics", "ntfs", "filesystem", "dfir", "mft"]
+categories = ["parser-implementations", "filesystem"]
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+# Independent oracles for doer-checker validation against real images are added
+# in later increments: omerbenamram/mft and ColinFinck/ntfs (both MIT/Apache-2.0).
+
+[lints.rust]
+unsafe_code = "forbid"
