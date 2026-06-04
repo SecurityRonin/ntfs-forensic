@@ -79,9 +79,70 @@ impl BootSector {
     /// [`NtfsError::BadOemId`] if it is not an NTFS volume, and the various
     /// `Bad*` variants for out-of-range geometry fields.
     pub fn parse(sector: &[u8]) -> Result<BootSector> {
-        let _ = sector;
-        todo!("VBR/$Boot parse — implemented in the GREEN step")
+        if sector.len() < MIN_LEN {
+            return Err(NtfsError::TooShort {
+                what: "boot sector",
+                need: MIN_LEN,
+                got: sector.len(),
+            });
+        }
+
+        let oem: [u8; 8] = sector[3..11].try_into().unwrap();
+        if &oem != OEM_ID {
+            return Err(NtfsError::BadOemId(oem));
+        }
+
+        let bytes_per_sector = u16::from_le_bytes([sector[0x0B], sector[0x0C]]);
+        if !(256..=4096).contains(&bytes_per_sector) || !bytes_per_sector.is_power_of_two() {
+            return Err(NtfsError::BadBytesPerSector(bytes_per_sector));
+        }
+
+        let sectors_per_cluster = sector[0x0D];
+        if sectors_per_cluster == 0 || !sectors_per_cluster.is_power_of_two() {
+            return Err(NtfsError::BadSectorsPerCluster(sectors_per_cluster));
+        }
+
+        let cluster_size = u64::from(bytes_per_sector) * u64::from(sectors_per_cluster);
+        let total_sectors = u64::from_le_bytes(sector[0x28..0x30].try_into().unwrap());
+        let mft_lcn = u64::from_le_bytes(sector[0x30..0x38].try_into().unwrap());
+        let mftmirr_lcn = u64::from_le_bytes(sector[0x38..0x40].try_into().unwrap());
+
+        let mft_record_size = record_size(sector[0x40], cluster_size)
+            .ok_or(NtfsError::BadRecordSize(sector[0x40]))?;
+        let index_record_size = record_size(sector[0x44], cluster_size)
+            .ok_or(NtfsError::BadIndexRecordSize(sector[0x44]))?;
+
+        let volume_serial = u64::from_le_bytes(sector[0x48..0x50].try_into().unwrap());
+
+        Ok(BootSector {
+            bytes_per_sector,
+            sectors_per_cluster,
+            total_sectors,
+            mft_lcn,
+            mftmirr_lcn,
+            mft_record_size,
+            index_record_size,
+            volume_serial,
+        })
     }
+}
+
+/// Decode a "clusters per record/index" byte into a size in bytes.
+///
+/// NTFS overloads this signed field: a positive value `v` means `v` clusters;
+/// a non-positive value means `2^|v|` bytes. The shift can overflow for crafted
+/// images (e.g. `0x80` = -128 ⇒ `2^128`), so we use `checked_shl` and bound the
+/// result to a sane range — never panicking on adversarial input.
+fn record_size(raw: u8, cluster_size: u64) -> Option<u64> {
+    let v = raw as i8;
+    let size = if v > 0 {
+        u64::from(v.unsigned_abs()).checked_mul(cluster_size)?
+    } else {
+        1u64.checked_shl(u32::from(v.unsigned_abs()))?
+    };
+    (MIN_RECORD_SIZE..=MAX_RECORD_SIZE)
+        .contains(&size)
+        .then_some(size)
 }
 
 #[cfg(test)]
@@ -122,7 +183,16 @@ mod tests {
         // 512 B/sector, 8 sectors/cluster ⇒ 4096-byte clusters.
         // clusters_per_record = 0xF6 (-10) ⇒ 2^10 = 1024-byte MFT records.
         // clusters_per_index  = 0x01       ⇒ 1 cluster = 4096-byte index buffers.
-        let b = make_boot(512, 8, 0x0010_0000, 0x0004_0000, 0x02, 0xF6, 0x01, 0xDEAD_BEEF_CAFE_F00D);
+        let b = make_boot(
+            512,
+            8,
+            0x0010_0000,
+            0x0004_0000,
+            0x02,
+            0xF6,
+            0x01,
+            0xDEAD_BEEF_CAFE_F00D,
+        );
         let bs = BootSector::parse(&b).expect("valid NTFS boot sector");
         assert_eq!(bs.bytes_per_sector, 512);
         assert_eq!(bs.sectors_per_cluster, 8);
