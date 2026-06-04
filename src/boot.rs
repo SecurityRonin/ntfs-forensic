@@ -19,10 +19,9 @@
 //! 0x48  u64    volume serial number
 //! ```
 
-use crate::error::{NtfsError, Result};
+use forensicnomicon::ntfs::{boot_offsets as off, OEM_ID};
 
-/// Expected OEM identifier at offset 3.
-const OEM_ID: &[u8; 8] = b"NTFS    ";
+use crate::error::{NtfsError, Result};
 
 /// Highest offset we read (volume serial ends at 0x50); we require this many bytes.
 const MIN_LEN: usize = 0x50;
@@ -87,32 +86,51 @@ impl BootSector {
             });
         }
 
-        let oem: [u8; 8] = sector[3..11].try_into().unwrap();
-        if &oem != OEM_ID {
+        let oem: [u8; 8] = sector[off::OEM_ID..off::OEM_ID + 8].try_into().unwrap();
+        if oem != OEM_ID {
             return Err(NtfsError::BadOemId(oem));
         }
 
-        let bytes_per_sector = u16::from_le_bytes([sector[0x0B], sector[0x0C]]);
+        let bytes_per_sector = u16::from_le_bytes(
+            sector[off::BYTES_PER_SECTOR..off::BYTES_PER_SECTOR + 2]
+                .try_into()
+                .unwrap(),
+        );
         if !(256..=4096).contains(&bytes_per_sector) || !bytes_per_sector.is_power_of_two() {
             return Err(NtfsError::BadBytesPerSector(bytes_per_sector));
         }
 
-        let sectors_per_cluster = sector[0x0D];
+        let sectors_per_cluster = sector[off::SECTORS_PER_CLUSTER];
         if sectors_per_cluster == 0 || !sectors_per_cluster.is_power_of_two() {
             return Err(NtfsError::BadSectorsPerCluster(sectors_per_cluster));
         }
 
         let cluster_size = u64::from(bytes_per_sector) * u64::from(sectors_per_cluster);
-        let total_sectors = u64::from_le_bytes(sector[0x28..0x30].try_into().unwrap());
-        let mft_lcn = u64::from_le_bytes(sector[0x30..0x38].try_into().unwrap());
-        let mftmirr_lcn = u64::from_le_bytes(sector[0x38..0x40].try_into().unwrap());
+        let total_sectors = u64::from_le_bytes(
+            sector[off::TOTAL_SECTORS..off::TOTAL_SECTORS + 8]
+                .try_into()
+                .unwrap(),
+        );
+        let mft_lcn =
+            u64::from_le_bytes(sector[off::MFT_LCN..off::MFT_LCN + 8].try_into().unwrap());
+        let mftmirr_lcn = u64::from_le_bytes(
+            sector[off::MFTMIRR_LCN..off::MFTMIRR_LCN + 8]
+                .try_into()
+                .unwrap(),
+        );
 
-        let mft_record_size = record_size(sector[0x40], cluster_size)
-            .ok_or(NtfsError::BadRecordSize(sector[0x40]))?;
-        let index_record_size = record_size(sector[0x44], cluster_size)
-            .ok_or(NtfsError::BadIndexRecordSize(sector[0x44]))?;
+        let cpr = sector[off::CLUSTERS_PER_RECORD];
+        let mft_record_size =
+            record_size(cpr, cluster_size).ok_or(NtfsError::BadRecordSize(cpr))?;
+        let cpi = sector[off::CLUSTERS_PER_INDEX];
+        let index_record_size =
+            record_size(cpi, cluster_size).ok_or(NtfsError::BadIndexRecordSize(cpi))?;
 
-        let volume_serial = u64::from_le_bytes(sector[0x48..0x50].try_into().unwrap());
+        let volume_serial = u64::from_le_bytes(
+            sector[off::VOLUME_SERIAL..off::VOLUME_SERIAL + 8]
+                .try_into()
+                .unwrap(),
+        );
 
         Ok(BootSector {
             bytes_per_sector,

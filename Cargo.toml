@@ -11,6 +11,10 @@ categories = ["parser-implementations", "filesystem"]
 
 [dependencies]
 thiserror = "2"
+# NTFS on-disk structure knowledge (magic, offsets, type codes) lives in the
+# KNOWLEDGE layer. Once forensicnomicon is feature-gated this becomes
+# `{ default-features = false, features = ["filesystems"] }` for a lean slice.
+forensicnomicon = { path = "../forensicnomicon" }
 
 [dev-dependencies]
 # Independent oracles for doer-checker validation against real images are added
