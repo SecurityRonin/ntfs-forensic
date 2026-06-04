@@ -17,10 +17,12 @@
 
 #![forbid(unsafe_code)]
 
+pub mod attribute;
 pub mod boot;
 pub mod error;
 pub mod record;
 
+pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use boot::BootSector;
 pub use error::{NtfsError, Result};
 pub use record::{apply_fixup, MftRecordHeader};

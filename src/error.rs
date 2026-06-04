@@ -48,6 +48,11 @@ pub enum NtfsError {
     #[error("malformed update sequence array: {0}")]
     BadUpdateSequence(&'static str),
 
+    /// An attribute is corrupt or would read out of bounds — rejected rather
+    /// than trusted (defends against crafted records).
+    #[error("corrupt attribute at offset {offset}: {detail}")]
+    BadAttribute { offset: usize, detail: &'static str },
+
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
