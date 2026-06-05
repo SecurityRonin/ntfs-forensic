@@ -151,8 +151,148 @@ impl Attribute {
 /// length that wouldn't advance the cursor, or whose name/body would read
 /// outside the record.
 pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<Attribute>> {
-    let _ = (record, first_attr_offset, attr_types::END, HEADER_MIN);
-    todo!("attribute walk — GREEN step")
+    let mut attrs = Vec::new();
+    let mut pos = first_attr_offset;
+
+    let bad = |offset: usize, detail: &'static str| NtfsError::BadAttribute { offset, detail };
+
+    for _ in 0..MAX_ATTRIBUTES {
+        // Need 4 bytes to read the type / end marker; run-off-the-end stops cleanly.
+        let Some(type_bytes) = record.get(pos + o::TYPE..pos + o::TYPE + 4) else {
+            break;
+        };
+        let type_code = u32::from_le_bytes(type_bytes.try_into().unwrap());
+        if type_code == attr_types::END {
+            break;
+        }
+
+        if pos + HEADER_MIN > record.len() {
+            return Err(bad(pos, "header runs past record"));
+        }
+
+        let length = u32::from_le_bytes(
+            record[pos + o::LENGTH..pos + o::LENGTH + 4]
+                .try_into()
+                .unwrap(),
+        );
+        if (length as usize) < HEADER_MIN {
+            return Err(bad(pos, "length below header minimum"));
+        }
+        let end = pos
+            .checked_add(length as usize)
+            .ok_or_else(|| bad(pos, "length overflow"))?;
+        if end > record.len() {
+            return Err(bad(pos, "attribute extends past record"));
+        }
+
+        let non_resident = record[pos + o::NON_RESIDENT] != 0;
+        let name_length = record[pos + o::NAME_LENGTH] as usize;
+        let name_offset = u16::from_le_bytes(
+            record[pos + o::NAME_OFFSET..pos + o::NAME_OFFSET + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        let flags = u16::from_le_bytes(
+            record[pos + o::FLAGS..pos + o::FLAGS + 2]
+                .try_into()
+                .unwrap(),
+        );
+        let attribute_id = u16::from_le_bytes(
+            record[pos + o::ATTRIBUTE_ID..pos + o::ATTRIBUTE_ID + 2]
+                .try_into()
+                .unwrap(),
+        );
+
+        // Optional name, bounded by both the attribute's length and the record.
+        let name = if name_length == 0 {
+            None
+        } else {
+            let nbytes = name_length
+                .checked_mul(2)
+                .ok_or_else(|| bad(pos, "name length overflow"))?;
+            let nstart = pos
+                .checked_add(name_offset)
+                .ok_or_else(|| bad(pos, "name offset overflow"))?;
+            let nend = nstart
+                .checked_add(nbytes)
+                .ok_or_else(|| bad(pos, "name overflow"))?;
+            if nend > end || nend > record.len() {
+                return Err(bad(pos, "name out of bounds"));
+            }
+            let units: Vec<u16> = record[nstart..nend]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            Some(
+                char::decode_utf16(units)
+                    .map(|r| r.unwrap_or('\u{FFFD}'))
+                    .collect(),
+            )
+        };
+
+        let body = if non_resident {
+            if pos + NONRESIDENT_MIN > end {
+                return Err(bad(pos, "non-resident header runs past attribute"));
+            }
+            let u64at = |rel: usize| {
+                u64::from_le_bytes(record[pos + rel..pos + rel + 8].try_into().unwrap())
+            };
+            let u16at = |rel: usize| {
+                u16::from_le_bytes(record[pos + rel..pos + rel + 2].try_into().unwrap())
+            };
+            AttributeBody::NonResident {
+                start_vcn: u64at(o::NR_START_VCN),
+                last_vcn: u64at(o::NR_LAST_VCN),
+                runs_offset: u16at(o::NR_RUNS_OFFSET),
+                compression_unit: u16at(o::NR_COMPRESSION_UNIT),
+                allocated_size: u64at(o::NR_ALLOCATED_SIZE),
+                real_size: u64at(o::NR_REAL_SIZE),
+                initialized_size: u64at(o::NR_INITIALIZED_SIZE),
+            }
+        } else {
+            if pos + RESIDENT_MIN > end {
+                return Err(bad(pos, "resident header runs past attribute"));
+            }
+            let content_length = u32::from_le_bytes(
+                record[pos + o::RES_CONTENT_LENGTH..pos + o::RES_CONTENT_LENGTH + 4]
+                    .try_into()
+                    .unwrap(),
+            );
+            let content_offset = u16::from_le_bytes(
+                record[pos + o::RES_CONTENT_OFFSET..pos + o::RES_CONTENT_OFFSET + 2]
+                    .try_into()
+                    .unwrap(),
+            );
+            let cstart = pos
+                .checked_add(content_offset as usize)
+                .ok_or_else(|| bad(pos, "content offset overflow"))?;
+            let cend = cstart
+                .checked_add(content_length as usize)
+                .ok_or_else(|| bad(pos, "content overflow"))?;
+            if cend > end || cend > record.len() {
+                return Err(bad(pos, "resident content out of bounds"));
+            }
+            AttributeBody::Resident {
+                content_offset,
+                content_length,
+            }
+        };
+
+        attrs.push(Attribute {
+            type_code,
+            length,
+            non_resident,
+            name,
+            flags,
+            attribute_id,
+            offset: pos,
+            body,
+        });
+
+        pos = end;
+    }
+
+    Ok(attrs)
 }
 
 #[cfg(test)]
@@ -216,7 +356,8 @@ mod tests {
         a[o::ATTRIBUTE_ID..o::ATTRIBUTE_ID + 2].copy_from_slice(&2u16.to_le_bytes());
         a[o::NR_START_VCN..o::NR_START_VCN + 8].copy_from_slice(&start_vcn.to_le_bytes());
         a[o::NR_LAST_VCN..o::NR_LAST_VCN + 8].copy_from_slice(&last_vcn.to_le_bytes());
-        a[o::NR_RUNS_OFFSET..o::NR_RUNS_OFFSET + 2].copy_from_slice(&(runs_offset as u16).to_le_bytes());
+        a[o::NR_RUNS_OFFSET..o::NR_RUNS_OFFSET + 2]
+            .copy_from_slice(&(runs_offset as u16).to_le_bytes());
         a[o::NR_COMPRESSION_UNIT..o::NR_COMPRESSION_UNIT + 2].copy_from_slice(&0u16.to_le_bytes());
         a[o::NR_ALLOCATED_SIZE..o::NR_ALLOCATED_SIZE + 8].copy_from_slice(&allocated.to_le_bytes());
         a[o::NR_REAL_SIZE..o::NR_REAL_SIZE + 8].copy_from_slice(&real.to_le_bytes());
@@ -259,7 +400,17 @@ mod tests {
     fn parses_nonresident_attribute() {
         // A trivial single-run runlist: header 0x21, 1 length byte, 2 offset bytes.
         let runs = [0x21u8, 0x08, 0x00, 0x10, 0x00];
-        let attr = nonresident(attr_types::DATA, None, 0, 0, 7, 0x8000, 0x7A00, 0x7A00, &runs);
+        let attr = nonresident(
+            attr_types::DATA,
+            None,
+            0,
+            0,
+            7,
+            0x8000,
+            0x7A00,
+            0x7A00,
+            &runs,
+        );
         let rec = record_with(0x38, &[attr]);
         let attrs = parse_attributes(&rec, 0x38).unwrap();
         let a = &attrs[0];
@@ -283,7 +434,12 @@ mod tests {
 
     #[test]
     fn decodes_named_ads_attribute() {
-        let attr = resident(attr_types::DATA, Some("Zone.Identifier"), 0, b"[ZoneTransfer]");
+        let attr = resident(
+            attr_types::DATA,
+            Some("Zone.Identifier"),
+            0,
+            b"[ZoneTransfer]",
+        );
         let rec = record_with(0x38, &[attr]);
         let attrs = parse_attributes(&rec, 0x38).unwrap();
         assert_eq!(attrs[0].name.as_deref(), Some("Zone.Identifier"));
@@ -370,7 +526,8 @@ mod tests {
         // A resident attr claiming a long name that runs past its own length.
         let mut attr = resident(attr_types::DATA, None, 0, b"x");
         attr[o::NAME_LENGTH] = 200; // 200 u16 chars = 400 bytes, far past the attr
-        attr[o::NAME_OFFSET..o::NAME_OFFSET + 2].copy_from_slice(&(RESIDENT_MIN as u16).to_le_bytes());
+        attr[o::NAME_OFFSET..o::NAME_OFFSET + 2]
+            .copy_from_slice(&(RESIDENT_MIN as u16).to_le_bytes());
         let rec = record_with(0x00, &[attr]);
         assert!(matches!(
             parse_attributes(&rec, 0x00),
