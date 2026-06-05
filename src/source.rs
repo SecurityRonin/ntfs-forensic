@@ -9,7 +9,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::error::{NtfsError, Result};
+use crate::error::Result;
 
 /// A `Read + Seek` view of `[base, base + len)` within an underlying source,
 /// addressed as if it began at offset 0.
@@ -27,9 +27,14 @@ impl<R: Read + Seek> OffsetReader<R> {
     /// # Errors
     ///
     /// [`NtfsError::Io`] if the underlying source cannot seek to `base`.
-    pub fn new(inner: R, base: u64, len: u64) -> Result<Self> {
-        let _ = (&inner, base, len);
-        todo!("OffsetReader::new — GREEN step")
+    pub fn new(mut inner: R, base: u64, len: u64) -> Result<Self> {
+        inner.seek(SeekFrom::Start(base))?;
+        Ok(Self {
+            inner,
+            base,
+            len,
+            pos: 0,
+        })
     }
 
     /// The partition length in bytes.
@@ -47,15 +52,42 @@ impl<R: Read + Seek> OffsetReader<R> {
 
 impl<R: Read + Seek> Read for OffsetReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let _ = buf;
-        todo!("OffsetReader::read — GREEN step")
+        let remaining = self.len.saturating_sub(self.pos);
+        if remaining == 0 {
+            return Ok(0);
+        }
+        // Never hand the inner reader more than the window has left.
+        let cap = remaining.min(buf.len() as u64) as usize;
+        // Re-anchor the inner reader: callers may have moved it elsewhere.
+        let abs = self.base.checked_add(self.pos).ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "offset overflow")
+        })?;
+        self.inner.seek(SeekFrom::Start(abs))?;
+        let n = self.inner.read(&mut buf[..cap])?;
+        self.pos += n as u64;
+        Ok(n)
     }
 }
 
 impl<R: Read + Seek> Seek for OffsetReader<R> {
     fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
-        let _ = from;
-        todo!("OffsetReader::seek — GREEN step")
+        // Resolve the requested position relative to the window, as a signed
+        // value so we can reject seeks before the start.
+        let target: i128 = match from {
+            SeekFrom::Start(n) => n as i128,
+            SeekFrom::Current(d) => self.pos as i128 + d as i128,
+            SeekFrom::End(d) => self.len as i128 + d as i128,
+        };
+        if target < 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "seek before partition start",
+            ));
+        }
+        // Position past the end is allowed (mirrors std semantics); reads there
+        // simply return EOF. Cap the stored value at u64.
+        self.pos = u64::try_from(target).unwrap_or(u64::MAX);
+        Ok(self.pos)
     }
 }
 
@@ -101,7 +133,7 @@ mod tests {
         let n = r.read(&mut buf).unwrap();
         assert_eq!(n, 2); // only 2 bytes remain in the window
         assert_eq!(&buf[..2], &[46, 47]); // disk bytes 46, 47
-        // A further read sees EOF, never disk bytes 48+.
+                                          // A further read sees EOF, never disk bytes 48+.
         assert_eq!(r.read(&mut buf).unwrap(), 0);
     }
 
