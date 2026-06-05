@@ -9,7 +9,7 @@
 
 use std::io::{Read, Seek, SeekFrom};
 
-use crate::attribute::Attribute;
+use crate::attribute::{Attribute, AttributeBody};
 use crate::error::{NtfsError, Result};
 use crate::runlist::{self, Run};
 
@@ -32,8 +32,53 @@ pub fn read_runs<R: Read + Seek>(
     cluster_size: u64,
     real_size: u64,
 ) -> Result<Vec<u8>> {
-    let _ = (reader, runs, cluster_size, real_size, MAX_VALUE_BYTES);
-    todo!("non-resident data read — GREEN step")
+    // Bytes the runs allocate (checked); the value can't exceed this.
+    let mut allocated = 0u64;
+    for r in runs {
+        let run_bytes = r
+            .length
+            .checked_mul(cluster_size)
+            .ok_or(NtfsError::BadRunlist("run byte length overflow"))?;
+        allocated = allocated
+            .checked_add(run_bytes)
+            .ok_or(NtfsError::BadRunlist("allocation overflow"))?;
+    }
+
+    let want = real_size.min(allocated);
+    if want > MAX_VALUE_BYTES {
+        return Err(NtfsError::TooLarge { bytes: want });
+    }
+    let want_usize = usize::try_from(want).map_err(|_| NtfsError::TooLarge { bytes: want })?;
+
+    let mut out: Vec<u8> = Vec::new();
+    out.try_reserve_exact(want_usize)
+        .map_err(|_| NtfsError::TooLarge { bytes: want })?;
+
+    let mut remaining = want;
+    for r in runs {
+        if remaining == 0 {
+            break;
+        }
+        let run_bytes = r.length * cluster_size; // already checked above
+        let take = run_bytes.min(remaining);
+        let take_usize = take as usize; // ≤ want ≤ MAX_VALUE_BYTES, fits usize
+
+        match r.lcn {
+            None => out.resize(out.len() + take_usize, 0), // sparse hole → zeroes
+            Some(lcn) => {
+                let byte_off = lcn
+                    .checked_mul(cluster_size)
+                    .ok_or(NtfsError::BadRunlist("LCN byte offset overflow"))?;
+                reader.seek(SeekFrom::Start(byte_off))?;
+                let start = out.len();
+                out.resize(start + take_usize, 0);
+                reader.read_exact(&mut out[start..])?;
+            }
+        }
+        remaining -= take;
+    }
+
+    Ok(out)
 }
 
 /// Read an attribute's value, dispatching on resident vs non-resident.
@@ -51,8 +96,42 @@ pub fn read_attribute_value<R: Read + Seek>(
     attribute: &Attribute,
     cluster_size: u64,
 ) -> Result<Vec<u8>> {
-    let _ = (reader, record, attribute, cluster_size, runlist::decode as fn(&[u8]) -> _);
-    todo!("attribute value read — GREEN step")
+    match attribute.body {
+        AttributeBody::Resident { .. } => attribute
+            .resident_content(record)
+            .map(<[u8]>::to_vec)
+            .ok_or(NtfsError::BadAttribute {
+                offset: attribute.offset,
+                detail: "resident content out of bounds",
+            }),
+        AttributeBody::NonResident {
+            runs_offset,
+            real_size,
+            ..
+        } => {
+            let attr_end = attribute
+                .offset
+                .checked_add(attribute.length as usize)
+                .ok_or(NtfsError::BadAttribute {
+                    offset: attribute.offset,
+                    detail: "attribute length overflow",
+                })?;
+            let runs_start = attribute.offset.checked_add(runs_offset as usize).ok_or(
+                NtfsError::BadAttribute {
+                    offset: attribute.offset,
+                    detail: "runs offset overflow",
+                },
+            )?;
+            let runs_bytes = record
+                .get(runs_start..attr_end)
+                .ok_or(NtfsError::BadAttribute {
+                    offset: attribute.offset,
+                    detail: "runlist out of bounds",
+                })?;
+            let runs = runlist::decode(runs_bytes)?;
+            read_runs(reader, &runs, cluster_size, real_size)
+        }
+    }
 }
 
 #[cfg(test)]
@@ -76,7 +155,10 @@ mod tests {
     fn reads_single_run() {
         let mut vol = volume(4, 512);
         // One run: 2 clusters starting at LCN 1.
-        let runs = [Run { length: 2, lcn: Some(1) }];
+        let runs = [Run {
+            length: 2,
+            lcn: Some(1),
+        }];
         let out = read_runs(&mut vol, &runs, 512, 1024).unwrap();
         assert_eq!(out.len(), 1024);
         assert!(out[..512].iter().all(|&b| b == 1));
@@ -86,7 +168,10 @@ mod tests {
     #[test]
     fn sparse_run_yields_zeroes_without_reading() {
         let mut vol = volume(1, 512); // too small to read 2 clusters — proves no read
-        let runs = [Run { length: 2, lcn: None }];
+        let runs = [Run {
+            length: 2,
+            lcn: None,
+        }];
         let out = read_runs(&mut vol, &runs, 512, 1024).unwrap();
         assert_eq!(out.len(), 1024);
         assert!(out.iter().all(|&b| b == 0));
@@ -95,7 +180,10 @@ mod tests {
     #[test]
     fn truncates_to_real_size() {
         let mut vol = volume(4, 512);
-        let runs = [Run { length: 2, lcn: Some(0) }]; // 1024 allocated
+        let runs = [Run {
+            length: 2,
+            lcn: Some(0),
+        }]; // 1024 allocated
         let out = read_runs(&mut vol, &runs, 512, 600).unwrap();
         assert_eq!(out.len(), 600);
     }
@@ -104,8 +192,14 @@ mod tests {
     fn mixed_data_and_sparse() {
         let mut vol = volume(4, 512);
         let runs = [
-            Run { length: 1, lcn: Some(3) }, // cluster 3 → all 3s
-            Run { length: 1, lcn: None },    // sparse → zeros
+            Run {
+                length: 1,
+                lcn: Some(3),
+            }, // cluster 3 → all 3s
+            Run {
+                length: 1,
+                lcn: None,
+            }, // sparse → zeros
         ];
         let out = read_runs(&mut vol, &runs, 512, 1024).unwrap();
         assert!(out[..512].iter().all(|&b| b == 3));
@@ -114,8 +208,14 @@ mod tests {
 
     #[test]
     fn refuses_implausible_size() {
+        // A crafted runlist that *allocates* far more than the ceiling — a
+        // single sparse run of 2^40 clusters. (A huge real_size alone is
+        // harmless: it is clamped to what the runs actually allocate.)
         let mut vol = volume(1, 512);
-        let runs = [Run { length: 1, lcn: None }];
+        let runs = [Run {
+            length: 1 << 40,
+            lcn: None,
+        }];
         assert!(matches!(
             read_runs(&mut vol, &runs, 512, u64::MAX),
             Err(NtfsError::TooLarge { .. })
@@ -125,7 +225,10 @@ mod tests {
     #[test]
     fn rejects_cluster_size_overflow() {
         let mut vol = volume(1, 512);
-        let runs = [Run { length: u64::MAX, lcn: Some(0) }];
+        let runs = [Run {
+            length: u64::MAX,
+            lcn: Some(0),
+        }];
         assert!(matches!(
             read_runs(&mut vol, &runs, 512, 1024),
             Err(NtfsError::BadRunlist(_))
@@ -152,7 +255,8 @@ mod tests {
         a[0x0A..0x0C].copy_from_slice(&name_offset.to_le_bytes());
         a[0x10..0x14].copy_from_slice(&(content.len() as u32).to_le_bytes());
         a[0x14..0x16].copy_from_slice(&content_offset.to_le_bytes());
-        a[content_offset as usize..content_offset as usize + content.len()].copy_from_slice(content);
+        a[content_offset as usize..content_offset as usize + content.len()]
+            .copy_from_slice(content);
         record.extend_from_slice(&a);
         record.extend_from_slice(&attr_types::END.to_le_bytes());
 
@@ -179,7 +283,8 @@ mod tests {
         a[0x20..0x22].copy_from_slice(&runs_offset.to_le_bytes()); // runs offset
         a[0x28..0x30].copy_from_slice(&512u64.to_le_bytes()); // allocated
         a[0x30..0x38].copy_from_slice(&512u64.to_le_bytes()); // real size
-        a[runs_offset as usize..runs_offset as usize + runs_bytes.len()].copy_from_slice(&runs_bytes);
+        a[runs_offset as usize..runs_offset as usize + runs_bytes.len()]
+            .copy_from_slice(&runs_bytes);
         record.extend_from_slice(&a);
         record.extend_from_slice(&attr_types::END.to_le_bytes());
 

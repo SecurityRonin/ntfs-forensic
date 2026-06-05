@@ -32,8 +32,54 @@ const MAX_RUNS: usize = 1 << 20;
 /// [`NtfsError::BadRunlist`] for an invalid field width, a truncated run, a
 /// zero-length run, or an LCN that overflows or goes negative.
 pub fn decode(bytes: &[u8]) -> Result<Vec<Run>> {
-    let _ = (bytes, MAX_RUNS);
-    todo!("runlist decode — GREEN step")
+    let mut runs = Vec::new();
+    let mut pos = 0usize;
+    let mut current_lcn: i64 = 0;
+
+    for _ in 0..MAX_RUNS {
+        let Some(&header) = bytes.get(pos) else {
+            break; // ran off the end without a terminator — stop cleanly
+        };
+        if header == 0 {
+            break; // explicit end of list
+        }
+        pos += 1;
+
+        let len_bytes = (header & 0x0F) as usize;
+        let off_bytes = (header >> 4) as usize;
+        if len_bytes == 0 || len_bytes > 8 {
+            return Err(NtfsError::BadRunlist("invalid run length field width"));
+        }
+        if off_bytes > 8 {
+            return Err(NtfsError::BadRunlist("invalid run offset field width"));
+        }
+
+        let length = read_uint(bytes, pos, len_bytes)
+            .ok_or(NtfsError::BadRunlist("length runs past end"))?;
+        pos += len_bytes;
+        if length == 0 {
+            return Err(NtfsError::BadRunlist("zero-length run"));
+        }
+
+        let lcn = if off_bytes == 0 {
+            None // sparse run — the running LCN is left unchanged
+        } else {
+            let delta = read_sint(bytes, pos, off_bytes)
+                .ok_or(NtfsError::BadRunlist("offset runs past end"))?;
+            pos += off_bytes;
+            current_lcn = current_lcn
+                .checked_add(delta)
+                .ok_or(NtfsError::BadRunlist("LCN overflow"))?;
+            if current_lcn < 0 {
+                return Err(NtfsError::BadRunlist("negative LCN"));
+            }
+            Some(current_lcn as u64)
+        };
+
+        runs.push(Run { length, lcn });
+    }
+
+    Ok(runs)
 }
 
 /// Total length of all runs, in clusters (checked).
@@ -42,8 +88,41 @@ pub fn decode(bytes: &[u8]) -> Result<Vec<Run>> {
 ///
 /// [`NtfsError::BadRunlist`] if the lengths overflow `u64`.
 pub fn total_clusters(runs: &[Run]) -> Result<u64> {
-    let _ = runs;
-    todo!("runlist total — GREEN step")
+    let mut total = 0u64;
+    for r in runs {
+        total = total
+            .checked_add(r.length)
+            .ok_or(NtfsError::BadRunlist("total cluster count overflow"))?;
+    }
+    Ok(total)
+}
+
+/// Read an `n`-byte (1..=8) little-endian unsigned integer at `pos`.
+fn read_uint(bytes: &[u8], pos: usize, n: usize) -> Option<u64> {
+    let slice = bytes.get(pos..pos.checked_add(n)?)?;
+    let mut v = 0u64;
+    for (i, &b) in slice.iter().enumerate() {
+        v |= u64::from(b) << (8 * i);
+    }
+    Some(v)
+}
+
+/// Read an `n`-byte (1..=8) little-endian *signed* integer at `pos`,
+/// sign-extending from the top bit.
+fn read_sint(bytes: &[u8], pos: usize, n: usize) -> Option<i64> {
+    let slice = bytes.get(pos..pos.checked_add(n)?)?;
+    let mut v = 0i64;
+    for (i, &b) in slice.iter().enumerate() {
+        v |= i64::from(b) << (8 * i);
+    }
+    let bits = n * 8;
+    if bits < 64 {
+        let sign_bit = 1i64 << (bits - 1);
+        if v & sign_bit != 0 {
+            v |= -(1i64 << bits); // set the high bits
+        }
+    }
+    Some(v)
 }
 
 #[cfg(test)]
@@ -54,7 +133,13 @@ mod tests {
     fn decodes_single_run() {
         // 0x21: 1 length byte, 2 offset bytes. length=8, offset=0x0100=256.
         let runs = decode(&[0x21, 0x08, 0x00, 0x01, 0x00]).unwrap();
-        assert_eq!(runs, vec![Run { length: 8, lcn: Some(256) }]);
+        assert_eq!(
+            runs,
+            vec![Run {
+                length: 8,
+                lcn: Some(256)
+            }]
+        );
     }
 
     #[test]
@@ -65,8 +150,14 @@ mod tests {
         assert_eq!(
             runs,
             vec![
-                Run { length: 4, lcn: Some(256) },
-                Run { length: 4, lcn: Some(512) },
+                Run {
+                    length: 4,
+                    lcn: Some(256)
+                },
+                Run {
+                    length: 4,
+                    lcn: Some(512)
+                },
             ]
         );
     }
@@ -75,7 +166,13 @@ mod tests {
     fn decodes_sparse_run() {
         // 0x01: 1 length byte, 0 offset bytes ⇒ sparse.
         let runs = decode(&[0x01, 0x05, 0x00]).unwrap();
-        assert_eq!(runs, vec![Run { length: 5, lcn: None }]);
+        assert_eq!(
+            runs,
+            vec![Run {
+                length: 5,
+                lcn: None
+            }]
+        );
     }
 
     #[test]
@@ -110,8 +207,14 @@ mod tests {
     #[test]
     fn total_clusters_sums_lengths() {
         let runs = vec![
-            Run { length: 4, lcn: Some(0) },
-            Run { length: 6, lcn: None },
+            Run {
+                length: 4,
+                lcn: Some(0),
+            },
+            Run {
+                length: 6,
+                lcn: None,
+            },
         ];
         assert_eq!(total_clusters(&runs).unwrap(), 10);
     }
