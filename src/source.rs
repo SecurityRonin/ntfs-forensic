@@ -1,0 +1,120 @@
+//! A bounded sub-reader that re-bases a partition to offset zero.
+//!
+//! A whole-disk image (raw, EWF- or VMDK-backed) holds several partitions. The
+//! NTFS reader expects offset 0 to be the volume boot record, so opening a
+//! partition means presenting just that partition's byte window as if it began
+//! at zero. [`OffsetReader`] does exactly that — and refuses every read or seek
+//! that would escape the window, so the filesystem layer cannot wander into an
+//! adjacent partition no matter how corrupt the structures it follows.
+
+use std::io::{Read, Seek, SeekFrom};
+
+use crate::error::{NtfsError, Result};
+
+/// A `Read + Seek` view of `[base, base + len)` within an underlying source,
+/// addressed as if it began at offset 0.
+#[derive(Debug)]
+pub struct OffsetReader<R> {
+    inner: R,
+    base: u64,
+    len: u64,
+    pos: u64,
+}
+
+impl<R: Read + Seek> OffsetReader<R> {
+    /// Create a window of `len` bytes starting at absolute byte `base`.
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::Io`] if the underlying source cannot seek to `base`.
+    pub fn new(inner: R, base: u64, len: u64) -> Result<Self> {
+        let _ = (&inner, base, len);
+        todo!("OffsetReader::new — GREEN step")
+    }
+
+    /// The partition length in bytes.
+    #[must_use]
+    pub fn len(&self) -> u64 {
+        self.len
+    }
+
+    /// Whether the partition window is empty.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<R: Read + Seek> Read for OffsetReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let _ = buf;
+        todo!("OffsetReader::read — GREEN step")
+    }
+}
+
+impl<R: Read + Seek> Seek for OffsetReader<R> {
+    fn seek(&mut self, from: SeekFrom) -> std::io::Result<u64> {
+        let _ = from;
+        todo!("OffsetReader::seek — GREEN step")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    /// 64 bytes of disk: partition at offset 16, length 32.
+    fn disk() -> Cursor<Vec<u8>> {
+        Cursor::new((0u8..64).collect())
+    }
+
+    #[test]
+    fn reads_are_relative_to_base() {
+        let mut r = OffsetReader::new(disk(), 16, 32).unwrap();
+        let mut buf = [0u8; 4];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, [16, 17, 18, 19]); // partition byte 0 == disk byte 16
+    }
+
+    #[test]
+    fn seek_is_relative_to_base() {
+        let mut r = OffsetReader::new(disk(), 16, 32).unwrap();
+        r.seek(SeekFrom::Start(8)).unwrap();
+        let mut buf = [0u8; 2];
+        r.read_exact(&mut buf).unwrap();
+        assert_eq!(buf, [24, 25]); // disk byte 16 + 8
+    }
+
+    #[test]
+    fn seek_end_is_partition_length() {
+        let mut r = OffsetReader::new(disk(), 16, 32).unwrap();
+        let end = r.seek(SeekFrom::End(0)).unwrap();
+        assert_eq!(end, 32); // not 64 — the window ends at the partition
+    }
+
+    #[test]
+    fn read_is_clamped_at_partition_end() {
+        let mut r = OffsetReader::new(disk(), 16, 32).unwrap();
+        r.seek(SeekFrom::Start(30)).unwrap();
+        let mut buf = [0u8; 8];
+        let n = r.read(&mut buf).unwrap();
+        assert_eq!(n, 2); // only 2 bytes remain in the window
+        assert_eq!(&buf[..2], &[46, 47]); // disk bytes 46, 47
+        // A further read sees EOF, never disk bytes 48+.
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn rejects_seek_before_start() {
+        let mut r = OffsetReader::new(disk(), 16, 32).unwrap();
+        assert!(r.seek(SeekFrom::Current(-1)).is_err());
+    }
+
+    #[test]
+    fn len_reports_window_size() {
+        let r = OffsetReader::new(disk(), 16, 32).unwrap();
+        assert_eq!(r.len(), 32);
+        assert!(!r.is_empty());
+    }
+}

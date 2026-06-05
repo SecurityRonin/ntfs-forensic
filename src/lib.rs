@@ -29,6 +29,7 @@ pub mod fs;
 pub mod index;
 pub mod record;
 pub mod runlist;
+pub mod source;
 pub mod standard_information;
 pub mod time;
 
@@ -47,5 +48,6 @@ pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use record::{apply_fixup, MftRecordHeader};
 pub use runlist::{decode as decode_runlist, Run};
+pub use source::OffsetReader;
 pub use standard_information::StandardInformation;
 pub use time::Filetime;
