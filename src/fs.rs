@@ -264,6 +264,7 @@ fn read_virtual<R: Read + Seek>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::source::OffsetReader;
     use std::io::Cursor;
 
     const SECTOR: usize = 512;
@@ -493,5 +494,277 @@ mod tests {
             fs.read_file("\\nope.txt"),
             Err(NtfsError::NotFound(_))
         ));
+    }
+
+    /// Materialise the synthetic volume to a unique temp file.
+    fn write_temp(bytes: &[u8], tag: &str) -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("ntfsf_{tag}_{}.img", std::process::id()));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// End-to-end over a real `std::fs::File` (not an in-memory cursor) — this
+    /// is the path a CLI takes against a raw NTFS partition image.
+    #[test]
+    fn read_file_over_file_backing() {
+        use std::fs::File;
+        let bytes = build_volume().into_inner();
+        let path = write_temp(&bytes, "file");
+        let mut fs = NtfsFs::open(File::open(&path).unwrap()).unwrap();
+        assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// End-to-end through an [`OffsetReader`] over a `File` — the partition sits
+    /// at a non-zero offset inside the disk image, exactly as in a real image.
+    #[test]
+    fn read_file_over_offset_reader_partition() {
+        use std::fs::File;
+        let bytes = build_volume().into_inner();
+        let pad = 8192usize; // partition begins 8 KiB into the "disk"
+        let mut disk = vec![0u8; pad];
+        disk.extend_from_slice(&bytes);
+        let path = write_temp(&disk, "offset");
+        let part =
+            OffsetReader::new(File::open(&path).unwrap(), pad as u64, bytes.len() as u64).unwrap();
+        let mut fs = NtfsFs::open(part).unwrap();
+        assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+        std::fs::remove_file(&path).ok();
+    }
+
+    // ── read_virtual branches ─────────────────────────────────────────────────
+
+    #[test]
+    fn read_virtual_sparse_run_reads_zeroes() {
+        let runs = [Run {
+            length: 2,
+            lcn: None,
+        }];
+        let mut cur = Cursor::new(Vec::<u8>::new()); // empty — proves no read happens
+        let out = read_virtual(&mut cur, &runs, CLUSTER as u64, 0, 1024).unwrap();
+        assert_eq!(out, vec![0u8; 1024]);
+    }
+
+    #[test]
+    fn read_virtual_rejects_physical_overflow() {
+        let runs = [Run {
+            length: 1,
+            lcn: Some(u64::MAX),
+        }];
+        let mut cur = Cursor::new(vec![0u8; CLUSTER]);
+        assert!(matches!(
+            read_virtual(&mut cur, &runs, CLUSTER as u64, 0, 16),
+            Err(NtfsError::BadRunlist(_))
+        ));
+    }
+
+    #[test]
+    fn read_virtual_rejects_read_past_runs() {
+        // One cluster mapped, but more is requested than the runs cover.
+        let runs = [Run {
+            length: 1,
+            lcn: Some(0),
+        }];
+        let mut cur = Cursor::new(vec![0u8; CLUSTER]);
+        assert!(matches!(
+            read_virtual(&mut cur, &runs, CLUSTER as u64, 0, 1024),
+            Err(NtfsError::BadRunlist(_))
+        ));
+    }
+
+    #[test]
+    fn read_virtual_skips_leading_runs_and_stops_when_satisfied() {
+        // Three runs; read just the middle cluster: run 0 is skipped (offset is
+        // past it) and run 2 is never reached (the request is already satisfied).
+        let runs = [
+            Run {
+                length: 1,
+                lcn: Some(0),
+            },
+            Run {
+                length: 1,
+                lcn: Some(1),
+            },
+            Run {
+                length: 1,
+                lcn: Some(2),
+            },
+        ];
+        let mut cur = Cursor::new(vec![7u8; 3 * CLUSTER]);
+        let out = read_virtual(
+            &mut cur,
+            &runs,
+            CLUSTER as u64,
+            CLUSTER as u64,
+            CLUSTER as u64,
+        )
+        .unwrap();
+        assert_eq!(out.len(), CLUSTER);
+    }
+
+    // ── mft_data_runs errors ──────────────────────────────────────────────────
+
+    #[test]
+    fn mft_data_runs_rejects_record_without_nonresident_data() {
+        // A non-$DATA attribute (skipped) followed by a resident $DATA (matched
+        // by type but not non-resident) — neither yields a runlist.
+        let mut attrs = attr_resident(attr_types::STANDARD_INFORMATION, None, &[0u8; 0x30]);
+        attrs.extend_from_slice(&resident_data(b"x"));
+        let rec = build_record(0x0001, &attrs);
+        assert!(matches!(
+            mft_data_runs(&rec),
+            Err(NtfsError::BadAttribute { detail, .. })
+                if detail == "$MFT has no non-resident $DATA"
+        ));
+    }
+
+    #[test]
+    fn read_record_rejects_number_past_mft() {
+        // Record 7 lies just past the 7-record synthetic MFT.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert!(matches!(fs.read_record(7), Err(NtfsError::BadRunlist(_))));
+    }
+
+    #[test]
+    fn large_directory_without_index_allocation_yields_root_entries() {
+        // is_large is set but there is no $INDEX_ALLOCATION; the scan is skipped.
+        let attrs = index_root_large(&[index_entry(9, "only.txt"), index_end()]);
+        let rec = build_record(0x0003, &attrs);
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let entries = fs.directory_entries(&rec).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.file_name.as_ref().map(|f| f.name.as_str()) == Some("only.txt")));
+    }
+
+    #[test]
+    fn mft_data_runs_rejects_runlist_out_of_bounds() {
+        // Non-resident $DATA whose runs_offset points past the attribute.
+        let mut a = vec![0u8; 0x40];
+        a[0..4].copy_from_slice(&attr_types::DATA.to_le_bytes());
+        a[4..8].copy_from_slice(&0x40u32.to_le_bytes());
+        a[0x08] = 1; // non-resident
+        a[0x20..0x22].copy_from_slice(&0xFFFFu16.to_le_bytes()); // runs offset past attr
+        let rec = build_record(0x0001, &a);
+        assert!(matches!(
+            mft_data_runs(&rec),
+            Err(NtfsError::BadAttribute { detail, .. }) if detail == "$MFT runlist out of bounds"
+        ));
+    }
+
+    // ── Large directory ($INDEX_ALLOCATION / INDX) ────────────────────────────
+
+    /// `$INDEX_ROOT` with the large-index flag set, so `directory_entries`
+    /// follows the `$INDEX_ALLOCATION`.
+    fn index_root_large(entries: &[Vec<u8>]) -> Vec<u8> {
+        let blob: Vec<u8> = entries.concat();
+        let mut content = vec![0u8; 0x10 + 0x10 + blob.len()];
+        content[0x00..0x04].copy_from_slice(&attr_types::FILE_NAME.to_le_bytes());
+        content[0x10..0x14].copy_from_slice(&0x10u32.to_le_bytes());
+        content[0x14..0x18].copy_from_slice(&((0x10 + blob.len()) as u32).to_le_bytes());
+        content[0x1C..0x20].copy_from_slice(&1u32.to_le_bytes()); // IH large flag
+        content[0x20..0x20 + blob.len()].copy_from_slice(&blob);
+        attr_resident(attr_types::INDEX_ROOT, Some("$I30"), &content)
+    }
+
+    /// A non-resident `$INDEX_ALLOCATION` whose runlist maps one cluster.
+    fn index_allocation(runs: &[u8], real_size: u64) -> Vec<u8> {
+        let mut a = nonresident_data(runs, real_size);
+        a[0..4].copy_from_slice(&attr_types::INDEX_ALLOCATION.to_le_bytes());
+        a
+    }
+
+    /// A 512-byte INDX buffer holding one entry → `target` named `name`.
+    fn build_indx(target: u64, name: &str) -> Vec<u8> {
+        let mut b = vec![0u8; CLUSTER];
+        b[0..4].copy_from_slice(b"INDX");
+        b[0x04..0x06].copy_from_slice(&0x28u16.to_le_bytes()); // usa_offset
+        b[0x06..0x08].copy_from_slice(&2u16.to_le_bytes()); // usa_count
+        let base = 0x18usize; // INDX index-header base
+        let first_entry = 0x40 - base;
+        let blob = [index_entry(target, name), index_end()].concat();
+        let total = (first_entry + blob.len()) as u32;
+        b[base..base + 4].copy_from_slice(&(first_entry as u32).to_le_bytes());
+        b[base + 4..base + 8].copy_from_slice(&total.to_le_bytes());
+        b[0x40..0x40 + blob.len()].copy_from_slice(&blob);
+        let usn = 0x0001u16;
+        b[0x28..0x2A].copy_from_slice(&usn.to_le_bytes());
+        b[510..512].copy_from_slice(&usn.to_le_bytes());
+        b
+    }
+
+    #[test]
+    fn lists_large_directory_via_index_allocation() {
+        // Volume: MFT (records 0,5) at LCN 4, INDX buffer at LCN 18.
+        let mft_clusters = 14u64; // 7 records × 1024 / 512
+        let indx_lcn = MFT_LCN + mft_clusters; // 18
+        let total_clusters = indx_lcn + 3;
+        let mut vol = vec![0u8; total_clusters as usize * CLUSTER];
+        vol[0..512].copy_from_slice(&build_boot());
+
+        let runs = [0x11u8, mft_clusters as u8, MFT_LCN as u8, 0x00];
+        let rec0 = build_record(
+            0x0001,
+            &nonresident_data(&runs, mft_clusters * CLUSTER as u64),
+        );
+
+        // record 5: large root → $INDEX_ALLOCATION spanning two clusters at
+        // LCN 18; the second cluster is not an INDX buffer, exercising the
+        // "boundary without an INDX signature" path of the scan.
+        let alloc_runs = [0x11u8, 0x02, indx_lcn as u8, 0x00];
+        let mut root_attrs = index_root_large(&[index_end()]);
+        root_attrs.extend_from_slice(&index_allocation(&alloc_runs, 2 * CLUSTER as u64));
+        let rec5 = build_record(0x0003, &root_attrs);
+
+        let mft_off = MFT_LCN as usize * CLUSTER;
+        vol[mft_off..mft_off + rec0.len()].copy_from_slice(&rec0);
+        let r5 = mft_off + 5 * REC;
+        vol[r5..r5 + rec5.len()].copy_from_slice(&rec5);
+
+        // The INDX buffer cluster, holding child "deep.bin" → record 9.
+        let indx = build_indx(9, "deep.bin");
+        let io = indx_lcn as usize * CLUSTER;
+        vol[io..io + indx.len()].copy_from_slice(&indx);
+
+        let mut fs = NtfsFs::open(Cursor::new(vol)).unwrap();
+        let root = fs.read_record(mft_records::ROOT).unwrap();
+        let entries = fs.directory_entries(&root).unwrap();
+        assert!(entries
+            .iter()
+            .any(|e| e.file_name.as_ref().map(|f| f.name.as_str()) == Some("deep.bin")));
+    }
+
+    #[test]
+    fn directory_without_index_root_is_not_a_directory() {
+        let rec = build_record(0x0001, &resident_data(b"x"));
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert!(matches!(
+            fs.directory_entries(&rec),
+            Err(NtfsError::NotADirectory(_))
+        ));
+    }
+
+    #[test]
+    fn read_record_propagates_fixup_error() {
+        // Corrupt record 6's second-sector tail so the fixup detects a torn write.
+        let mut vol = build_volume().into_inner();
+        let rec6_tail = MFT_LCN as usize * CLUSTER + 6 * REC + 1022;
+        vol[rec6_tail] ^= 0xFF;
+        let mut fs = NtfsFs::open(Cursor::new(vol)).unwrap();
+        assert!(matches!(
+            fs.read_record(6),
+            Err(NtfsError::FixupMismatch { .. })
+        ));
+    }
+
+    #[test]
+    fn directory_entries_propagates_index_allocation_error() {
+        // Large directory whose $INDEX_ALLOCATION runlist points past the volume.
+        let alloc_runs = [0x11u8, 0x01, 0x7F, 0x00]; // LCN 127, beyond the volume
+        let mut attrs = index_root_large(&[index_end()]);
+        attrs.extend_from_slice(&index_allocation(&alloc_runs, CLUSTER as u64));
+        let rec = build_record(0x0003, &attrs);
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert!(fs.directory_entries(&rec).is_err());
     }
 }

@@ -392,4 +392,77 @@ mod tests {
             Err(NtfsError::BadIndex(_))
         ));
     }
+
+    #[test]
+    fn index_root_rejects_too_short() {
+        assert!(matches!(
+            IndexRoot::parse(&[0u8; 4]),
+            Err(NtfsError::TooShort { .. })
+        ));
+    }
+
+    #[test]
+    fn index_header_rejects_past_buffer() {
+        // Fewer bytes remain than an index header needs.
+        assert!(matches!(
+            parse_index_header(&[0u8; 4], 0),
+            Err(NtfsError::BadIndex(_))
+        ));
+    }
+
+    #[test]
+    fn index_header_rejects_entry_region_out_of_bounds() {
+        let mut node = vec![0u8; INDEX_HEADER_LEN];
+        node[ih::TOTAL_SIZE..ih::TOTAL_SIZE + 4].copy_from_slice(&0xFFFFu32.to_le_bytes());
+        assert!(matches!(
+            parse_index_header(&node, 0),
+            Err(NtfsError::BadIndex(_))
+        ));
+    }
+
+    #[test]
+    fn parse_entries_rejects_region_out_of_bounds() {
+        let node = vec![0u8; 0x20];
+        assert!(matches!(
+            parse_entries(&node, 0, node.len() + 1),
+            Err(NtfsError::BadIndex(_))
+        ));
+    }
+
+    #[test]
+    fn parse_entries_stops_when_no_header_room() {
+        // Empty range: no entry header fits, so it returns empty without panic.
+        assert!(parse_entries(&[], 0, 0).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rejects_subnode_vcn_not_fitting() {
+        // SUBNODE flag set but the entry is too small to hold the 8-byte VCN.
+        let mut e = end_entry();
+        e[ie::FLAGS] = IE_FLAG_SUBNODE;
+        assert!(matches!(
+            parse_entries(&e, 0, e.len()),
+            Err(NtfsError::BadIndex(_))
+        ));
+    }
+
+    #[test]
+    fn rejects_stream_extending_past_entry() {
+        let mut e = entry(11, "x.txt");
+        let big = e.len() as u16 + 0x100;
+        e[ie::STREAM_LENGTH..ie::STREAM_LENGTH + 2].copy_from_slice(&big.to_le_bytes());
+        assert!(matches!(
+            parse_entries(&e, 0, e.len()),
+            Err(NtfsError::BadIndex(_))
+        ));
+    }
+
+    #[test]
+    fn index_buffer_rejects_too_short() {
+        let mut b = vec![0u8; 16];
+        assert!(matches!(
+            parse_index_buffer(&mut b, 512, 512),
+            Err(NtfsError::TooShort { .. })
+        ));
+    }
 }

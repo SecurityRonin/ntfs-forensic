@@ -167,6 +167,19 @@ mod tests {
     }
 
     #[test]
+    fn rejects_name_extending_past_entry() {
+        // entry_length leaves no room for the declared name.
+        let mut content = vec![0u8; ENTRY_MIN];
+        content[0x04..0x06].copy_from_slice(&(ENTRY_MIN as u16).to_le_bytes());
+        content[0x06] = 4; // name_length = 4 chars (8 bytes)
+        content[0x07] = ENTRY_MIN as u8; // name_offset at the very end
+        assert!(matches!(
+            parse(&content),
+            Err(NtfsError::BadAttributeList(d)) if d == "name extends past entry"
+        ));
+    }
+
+    #[test]
     fn rejects_entry_past_content() {
         let mut content = vec![0u8; 0x20];
         content[0x04..0x06].copy_from_slice(&0x100u16.to_le_bytes());

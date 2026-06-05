@@ -228,6 +228,23 @@ mod tests {
     }
 
     #[test]
+    fn rejects_offset_field_too_large() {
+        // high nibble 9 ⇒ 9-byte offset, impossible for u64.
+        assert!(matches!(
+            decode(&[0x91, 0x05]),
+            Err(NtfsError::BadRunlist(_))
+        ));
+    }
+
+    #[test]
+    fn decodes_full_width_eight_byte_offset() {
+        // off_bytes = 8 ⇒ the signed read takes the full-width (no sign-extend) path.
+        let rl = [0x81u8, 0x05, 0x10, 0, 0, 0, 0, 0, 0, 0];
+        let runs = decode(&rl).unwrap();
+        assert_eq!(runs[0].lcn, Some(0x10));
+    }
+
+    #[test]
     fn rejects_truncated_run() {
         // header wants 1 length + 2 offset bytes, but only the length is present.
         assert!(matches!(

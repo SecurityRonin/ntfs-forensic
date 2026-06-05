@@ -294,4 +294,82 @@ mod tests {
         assert_eq!(out.len(), 512);
         assert!(out.iter().all(|&b| b == 2));
     }
+
+    #[test]
+    fn stops_reading_once_real_size_is_met() {
+        // real_size covers only the first run; the second run must not be read.
+        let mut vol = volume(4, 512);
+        let runs = [
+            Run {
+                length: 1,
+                lcn: Some(0),
+            },
+            Run {
+                length: 1,
+                lcn: Some(1),
+            },
+        ];
+        let out = read_runs(&mut vol, &runs, 512, 512).unwrap();
+        assert_eq!(out.len(), 512); // only the first run's worth
+    }
+
+    #[test]
+    fn rejects_runlist_region_out_of_bounds() {
+        use crate::attribute::{Attribute, AttributeBody};
+        // runs_offset points past the attribute, so the runlist slice is invalid.
+        let attr = Attribute {
+            type_code: forensicnomicon::ntfs::attr_types::DATA,
+            length: 0x48,
+            non_resident: true,
+            name: None,
+            flags: 0,
+            attribute_id: 0,
+            offset: 0,
+            body: AttributeBody::NonResident {
+                start_vcn: 0,
+                last_vcn: 0,
+                runs_offset: 0xFFFF,
+                compression_unit: 0,
+                allocated_size: 512,
+                real_size: 512,
+                initialized_size: 512,
+            },
+        };
+        let record = vec![0u8; 0x48];
+        let mut vol = volume(1, 512);
+        assert!(matches!(
+            read_attribute_value(&mut vol, &record, &attr, 512),
+            Err(NtfsError::BadAttribute { detail, .. }) if detail == "runlist out of bounds"
+        ));
+    }
+
+    #[test]
+    fn rejects_runs_offset_overflow() {
+        use crate::attribute::{Attribute, AttributeBody};
+        // offset + length stays in range, but offset + runs_offset overflows.
+        let attr = Attribute {
+            type_code: forensicnomicon::ntfs::attr_types::DATA,
+            length: 0x48,
+            non_resident: true,
+            name: None,
+            flags: 0,
+            attribute_id: 0,
+            offset: usize::MAX - 0x48,
+            body: AttributeBody::NonResident {
+                start_vcn: 0,
+                last_vcn: 0,
+                runs_offset: 0x49,
+                compression_unit: 0,
+                allocated_size: 512,
+                real_size: 512,
+                initialized_size: 512,
+            },
+        };
+        let record = vec![0u8; 1];
+        let mut vol = volume(1, 512);
+        assert!(matches!(
+            read_attribute_value(&mut vol, &record, &attr, 512),
+            Err(NtfsError::BadAttribute { detail, .. }) if detail == "runs offset overflow"
+        ));
+    }
 }

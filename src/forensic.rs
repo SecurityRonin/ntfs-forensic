@@ -232,6 +232,12 @@ mod tests {
     }
 
     #[test]
+    fn carve_with_zero_record_size_is_empty() {
+        // A zero stride would loop forever; it is refused with an empty result.
+        assert!(carve_file_records(b"FILE....", 0).is_empty());
+    }
+
+    #[test]
     fn carves_file_records_at_boundaries() {
         let rec = 1024usize;
         let mut mft = vec![0u8; rec * 4];

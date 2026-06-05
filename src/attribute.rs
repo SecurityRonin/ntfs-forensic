@@ -370,6 +370,50 @@ mod tests {
     #[test]
     fn parses_nonresident_attribute() {
         // A trivial single-run runlist: header 0x21, 1 length byte, 2 offset bytes.
+        // Named, so the name-encoding path is exercised too.
+        let runs = [0x21u8, 0x08, 0x00, 0x10, 0x00];
+        let attr = nonresident(
+            attr_types::DATA,
+            Some("ads"),
+            0,
+            0,
+            7,
+            0x8000,
+            0x7A00,
+            0x7A00,
+            &runs,
+        );
+        let rec = record_with(0x38, &[attr]);
+        let attrs = parse_attributes(&rec, 0x38).unwrap();
+        let a = &attrs[0];
+        assert!(a.non_resident);
+        assert_eq!(a.name.as_deref(), Some("ads"));
+        assert_eq!(
+            a.body,
+            AttributeBody::NonResident {
+                start_vcn: 0,
+                last_vcn: 7,
+                runs_offset: 0x48,
+                compression_unit: 0,
+                allocated_size: 0x8000,
+                real_size: 0x7A00,
+                initialized_size: 0x7A00,
+            }
+        );
+    }
+
+    /// A 16-byte header with a custom declared `length` and resident flag, used
+    /// to drive the bounds-check error branches.
+    fn header(type_code: u32, length: u32, non_resident: bool) -> Vec<u8> {
+        let mut a = vec![0u8; length.max(HEADER_MIN as u32) as usize];
+        a[o::TYPE..o::TYPE + 4].copy_from_slice(&type_code.to_le_bytes());
+        a[o::LENGTH..o::LENGTH + 4].copy_from_slice(&length.to_le_bytes());
+        a[o::NON_RESIDENT] = u8::from(non_resident);
+        a
+    }
+
+    #[test]
+    fn resident_content_is_none_for_non_resident() {
         let runs = [0x21u8, 0x08, 0x00, 0x10, 0x00];
         let attr = nonresident(
             attr_types::DATA,
@@ -384,23 +428,57 @@ mod tests {
         );
         let rec = record_with(0x38, &[attr]);
         let attrs = parse_attributes(&rec, 0x38).unwrap();
-        let a = &attrs[0];
-        assert!(a.non_resident);
-        match a.body {
-            AttributeBody::NonResident {
-                start_vcn,
-                last_vcn,
-                allocated_size,
-                real_size,
-                ..
-            } => {
-                assert_eq!(start_vcn, 0);
-                assert_eq!(last_vcn, 7);
-                assert_eq!(allocated_size, 0x8000);
-                assert_eq!(real_size, 0x7A00);
-            }
-            _ => panic!("expected non-resident"),
-        }
+        assert_eq!(attrs[0].resident_content(&rec), None);
+    }
+
+    #[test]
+    fn rejects_header_running_past_record() {
+        // 4 valid type bytes (DATA), but no room for the rest of the header.
+        let rec = attr_types::DATA.to_le_bytes().to_vec();
+        assert!(matches!(
+            parse_attributes(&rec, 0),
+            Err(NtfsError::BadAttribute { detail, .. }) if detail == "header runs past record"
+        ));
+    }
+
+    #[test]
+    fn rejects_nonresident_header_past_attribute() {
+        // non-resident flag set but length < NONRESIDENT_MIN.
+        let attr = header(attr_types::DATA, 0x20, true);
+        let rec = record_with(0, &[attr]);
+        assert!(matches!(
+            parse_attributes(&rec, 0),
+            Err(NtfsError::BadAttribute { detail, .. })
+                if detail == "non-resident header runs past attribute"
+        ));
+    }
+
+    #[test]
+    fn rejects_resident_header_past_attribute() {
+        // resident, length in [HEADER_MIN, RESIDENT_MIN).
+        let attr = header(attr_types::DATA, 0x10, false);
+        let rec = record_with(0, &[attr]);
+        assert!(matches!(
+            parse_attributes(&rec, 0),
+            Err(NtfsError::BadAttribute { detail, .. })
+                if detail == "resident header runs past attribute"
+        ));
+    }
+
+    #[test]
+    fn rejects_resident_content_out_of_bounds() {
+        // resident header, but content_offset + content_length exceeds the attr.
+        let mut attr = header(attr_types::DATA, 0x18, false);
+        attr[o::RES_CONTENT_LENGTH..o::RES_CONTENT_LENGTH + 4]
+            .copy_from_slice(&0xFFFFu32.to_le_bytes());
+        attr[o::RES_CONTENT_OFFSET..o::RES_CONTENT_OFFSET + 2]
+            .copy_from_slice(&0x18u16.to_le_bytes());
+        let rec = record_with(0, &[attr]);
+        assert!(matches!(
+            parse_attributes(&rec, 0),
+            Err(NtfsError::BadAttribute { detail, .. })
+                if detail == "resident content out of bounds"
+        ));
     }
 
     #[test]

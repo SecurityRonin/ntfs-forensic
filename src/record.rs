@@ -199,11 +199,7 @@ mod tests {
     /// Build a `FILE` record with a valid USA: `usn` written to each sector
     /// tail, the `originals` stored in the USA. One original per sector.
     fn make_record(size: usize, sector_size: usize, usn: u16, originals: &[u16]) -> Vec<u8> {
-        assert_eq!(
-            size / sector_size,
-            originals.len(),
-            "one original per sector"
-        );
+        assert_eq!(size / sector_size, originals.len());
         let mut b = vec![0u8; size];
         b[0..4].copy_from_slice(b"FILE");
         let usa_offset: u16 = 0x30;
@@ -347,6 +343,35 @@ mod tests {
         assert!(matches!(
             apply_fixup(&mut b, 512),
             Err(NtfsError::BadUpdateSequence(_))
+        ));
+    }
+
+    #[test]
+    fn fixup_rejects_buffer_shorter_than_header() {
+        let mut b = vec![0u8; HEADER_LEN - 1];
+        assert!(matches!(
+            apply_fixup(&mut b, 512),
+            Err(NtfsError::TooShort { .. })
+        ));
+    }
+
+    #[test]
+    fn fixup_rejects_sector_size_below_two() {
+        let mut b = make_record(1024, 512, 1, &[0, 0]);
+        assert!(matches!(
+            apply_fixup(&mut b, 1),
+            Err(NtfsError::BadUpdateSequence(_))
+        ));
+    }
+
+    #[test]
+    fn fixup_rejects_sectors_exceeding_record() {
+        // USA fits, but (usa_count - 1) sectors span more than the buffer holds.
+        let mut b = make_record(1024, 512, 1, &[0, 0]);
+        b[0x06..0x08].copy_from_slice(&10u16.to_le_bytes()); // 9 sectors × 512 > 1024
+        assert!(matches!(
+            apply_fixup(&mut b, 512),
+            Err(NtfsError::BadUpdateSequence(detail)) if detail.contains("exceed")
         ));
     }
 }

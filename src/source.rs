@@ -149,4 +149,14 @@ mod tests {
         assert_eq!(r.len(), 32);
         assert!(!r.is_empty());
     }
+
+    #[test]
+    fn read_rejects_base_plus_position_overflow() {
+        // base near u64::MAX: a non-zero position makes base + pos overflow.
+        let mut r = OffsetReader::new(disk(), u64::MAX, u64::MAX).unwrap();
+        r.seek(SeekFrom::Start(1)).unwrap();
+        let mut buf = [0u8; 4];
+        let err = r.read(&mut buf).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
+    }
 }
