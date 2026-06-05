@@ -26,7 +26,7 @@ impl<R: Read + Seek> OffsetReader<R> {
     ///
     /// # Errors
     ///
-    /// [`NtfsError::Io`] if the underlying source cannot seek to `base`.
+    /// [`crate::NtfsError::Io`] if the underlying source cannot seek to `base`.
     pub fn new(mut inner: R, base: u64, len: u64) -> Result<Self> {
         inner.seek(SeekFrom::Start(base))?;
         Ok(Self {
