@@ -53,6 +53,16 @@ pub enum NtfsError {
     #[error("corrupt attribute at offset {offset}: {detail}")]
     BadAttribute { offset: usize, detail: &'static str },
 
+    /// A data runlist is malformed (bad field size, truncated, or overflowing).
+    #[error("malformed runlist: {0}")]
+    BadRunlist(&'static str),
+
+    /// A structure declared a size that would require an unreasonable
+    /// allocation — refused rather than attempted (defends against crafted
+    /// sizes / allocation bombs).
+    #[error("refusing to allocate {bytes} bytes")]
+    TooLarge { bytes: u64 },
+
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

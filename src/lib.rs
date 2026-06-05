@@ -19,16 +19,20 @@
 
 pub mod attribute;
 pub mod boot;
+pub mod data;
 pub mod error;
 pub mod file_name;
 pub mod record;
+pub mod runlist;
 pub mod standard_information;
 pub mod time;
 
 pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use boot::BootSector;
+pub use data::{read_attribute_value, read_runs};
 pub use error::{NtfsError, Result};
 pub use file_name::{FileName, FileReference};
 pub use record::{apply_fixup, MftRecordHeader};
+pub use runlist::{decode as decode_runlist, Run};
 pub use standard_information::StandardInformation;
 pub use time::Filetime;
