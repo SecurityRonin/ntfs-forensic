@@ -23,8 +23,103 @@ const MAX_OUTPUT: usize = 1 << 30; // 1 GiB
 /// [`NtfsError::BadCompression`] for a truncated chunk, a back-reference before
 /// the chunk start, or output exceeding the safety ceiling.
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>> {
-    let _ = (input, MAX_OUTPUT);
-    todo!("LZNT1 decompress — GREEN step")
+    let mut out = Vec::new();
+    let mut pos = 0;
+
+    while pos + 2 <= input.len() {
+        let header = u16::from_le_bytes([input[pos], input[pos + 1]]);
+        pos += 2;
+        if header == 0 {
+            break; // end of the compressed stream
+        }
+        let chunk_size = (header & 0x0FFF) as usize + 1;
+        let is_compressed = header & 0x8000 != 0;
+        let chunk = input
+            .get(pos..pos + chunk_size)
+            .ok_or(NtfsError::BadCompression("chunk extends past input"))?;
+        pos += chunk_size;
+
+        if is_compressed {
+            decompress_chunk(chunk, &mut out)?;
+        } else {
+            grow(&mut out, chunk.len())?;
+            let end = out.len();
+            out[end - chunk.len()..].copy_from_slice(chunk);
+        }
+    }
+
+    Ok(out)
+}
+
+/// Decompress one LZNT1 chunk, appending to `out`.
+fn decompress_chunk(chunk: &[u8], out: &mut Vec<u8>) -> Result<()> {
+    let chunk_start = out.len();
+    let mut i = 0;
+
+    while i < chunk.len() {
+        let flags = chunk[i];
+        i += 1;
+        for bit in 0..8 {
+            if i >= chunk.len() {
+                break;
+            }
+            if flags & (1 << bit) == 0 {
+                // Literal byte.
+                grow(out, 1)?;
+                let end = out.len();
+                out[end - 1] = chunk[i];
+                i += 1;
+            } else {
+                // Back-reference token (2 bytes).
+                let token_bytes = chunk
+                    .get(i..i + 2)
+                    .ok_or(NtfsError::BadCompression("truncated back-reference"))?;
+                let token = u16::from_le_bytes([token_bytes[0], token_bytes[1]]);
+                i += 2;
+
+                let produced = out.len() - chunk_start;
+                if produced == 0 {
+                    return Err(NtfsError::BadCompression("back-reference at chunk start"));
+                }
+
+                // The length/offset bit-split widens as the chunk fills.
+                let mut length_bits = 4u32;
+                let mut threshold = 0x10usize;
+                while produced >= threshold {
+                    length_bits += 1;
+                    threshold <<= 1;
+                }
+                let length_mask = (1u16 << length_bits) - 1;
+                let length = (token & length_mask) as usize + 3;
+                let offset = (token >> length_bits) as usize + 1;
+                if offset > produced {
+                    return Err(NtfsError::BadCompression(
+                        "back-reference before chunk start",
+                    ));
+                }
+
+                let src = out.len() - offset;
+                grow(out, length)?;
+                for k in 0..length {
+                    let b = out[src + k]; // overlapping copy is well-defined
+                    let idx = out.len() - length + k;
+                    out[idx] = b;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Grow `out` by `n` zero bytes, refusing implausible totals.
+fn grow(out: &mut Vec<u8>, n: usize) -> Result<()> {
+    let new_len = out
+        .len()
+        .checked_add(n)
+        .filter(|&l| l <= MAX_OUTPUT)
+        .ok_or(NtfsError::BadCompression("output exceeds ceiling"))?;
+    out.resize(new_len, 0);
+    Ok(())
 }
 
 #[cfg(test)]
@@ -65,6 +160,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // keep the ((offset-1)<<4)|(length-3) formula explicit
     fn decompresses_back_reference() {
         // Literals "abc", then a back-reference (offset 3, length 3) ⇒ "abcabc".
         // After 3 bytes, length_bits = 4 ⇒ token = ((offset-1) << 4) | (length-3).
@@ -77,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::identity_op)] // keep the ((offset-1)<<4)|(length-3) formula explicit
     fn decompresses_run_length() {
         // Literal 'x', then back-ref offset 1 length 10 ⇒ "xxxxxxxxxxx".
         let token: u16 = ((1 - 1) << 4) | (10 - 3); // offset 1, length 10

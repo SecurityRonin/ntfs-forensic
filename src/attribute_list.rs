@@ -44,8 +44,68 @@ impl AttributeListEntry {
 /// [`NtfsError::BadAttributeList`] for an undersized entry, an entry past the
 /// content, or a name out of bounds.
 pub fn parse(content: &[u8]) -> Result<Vec<AttributeListEntry>> {
-    let _ = (content, ENTRY_MIN, MAX_ENTRIES);
-    todo!("$ATTRIBUTE_LIST parse — GREEN step")
+    let mut entries = Vec::new();
+    let mut pos = 0;
+
+    for _ in 0..MAX_ENTRIES {
+        if pos + ENTRY_MIN > content.len() {
+            break;
+        }
+        let entry_length =
+            u16::from_le_bytes(content[pos + 0x04..pos + 0x06].try_into().unwrap()) as usize;
+        if entry_length < ENTRY_MIN {
+            return Err(NtfsError::BadAttributeList("entry length below minimum"));
+        }
+        let entry_end = pos
+            .checked_add(entry_length)
+            .ok_or(NtfsError::BadAttributeList("entry length overflow"))?;
+        if entry_end > content.len() {
+            return Err(NtfsError::BadAttributeList("entry extends past content"));
+        }
+
+        let type_code = u32::from_le_bytes(content[pos..pos + 4].try_into().unwrap());
+        let name_length = content[pos + 0x06] as usize;
+        let name_offset = content[pos + 0x07] as usize;
+        let start_vcn = u64::from_le_bytes(content[pos + 0x08..pos + 0x10].try_into().unwrap());
+        let base_reference = FileReference::from_u64(u64::from_le_bytes(
+            content[pos + 0x10..pos + 0x18].try_into().unwrap(),
+        ));
+        let attribute_id = u16::from_le_bytes(content[pos + 0x18..pos + 0x1A].try_into().unwrap());
+
+        let name = if name_length == 0 {
+            None
+        } else {
+            let n_start = pos
+                .checked_add(name_offset)
+                .ok_or(NtfsError::BadAttributeList("name offset overflow"))?;
+            let n_end = n_start
+                .checked_add(name_length * 2)
+                .ok_or(NtfsError::BadAttributeList("name length overflow"))?;
+            if n_end > entry_end {
+                return Err(NtfsError::BadAttributeList("name extends past entry"));
+            }
+            let units: Vec<u16> = content[n_start..n_end]
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
+            Some(
+                char::decode_utf16(units)
+                    .map(|r| r.unwrap_or('\u{FFFD}'))
+                    .collect(),
+            )
+        };
+
+        entries.push(AttributeListEntry {
+            type_code,
+            start_vcn,
+            base_reference,
+            attribute_id,
+            name,
+        });
+        pos = entry_end;
+    }
+
+    Ok(entries)
 }
 
 #[cfg(test)]
