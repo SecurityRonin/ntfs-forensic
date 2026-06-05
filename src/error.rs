@@ -61,6 +61,14 @@ pub enum NtfsError {
     #[error("malformed index: {0}")]
     BadIndex(&'static str),
 
+    /// A path component was not found.
+    #[error("path not found: {0}")]
+    NotFound(String),
+
+    /// A path component that should be a directory is not one.
+    #[error("not a directory: {0}")]
+    NotADirectory(String),
+
     /// A structure declared a size that would require an unreasonable
     /// allocation — refused rather than attempted (defends against crafted
     /// sizes / allocation bombs).
