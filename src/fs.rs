@@ -32,9 +32,25 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// # Errors
     ///
     /// Propagates boot-sector, record, and runlist errors.
-    pub fn open(reader: R) -> Result<Self> {
-        let _ = (reader, SeekFrom::Start(0));
-        todo!("NtfsFs::open — GREEN step")
+    pub fn open(mut reader: R) -> Result<Self> {
+        reader.seek(SeekFrom::Start(0))?;
+        let mut boot_buf = [0u8; 512];
+        reader.read_exact(&mut boot_buf)?;
+        let boot = BootSector::parse(&boot_buf)?;
+
+        // Bootstrap: record 0 ($MFT) sits at its byte offset; read it directly
+        // and pull its own $DATA runlist so we can find every other record.
+        reader.seek(SeekFrom::Start(boot.mft_byte_offset()))?;
+        let mut rec0 = vec![0u8; boot.mft_record_size as usize];
+        reader.read_exact(&mut rec0)?;
+        apply_fixup(&mut rec0, boot.bytes_per_sector as usize)?;
+        let mft_runs = mft_data_runs(&rec0)?;
+
+        Ok(NtfsFs {
+            reader,
+            boot,
+            mft_runs,
+        })
     }
 
     /// The parsed boot sector.
@@ -50,8 +66,19 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// [`NtfsError::BadRunlist`] if the record lies outside the MFT, plus
     /// record / fixup errors.
     pub fn read_record(&mut self, n: u64) -> Result<Vec<u8>> {
-        let _ = n;
-        todo!("NtfsFs::read_record — GREEN step")
+        let rec_size = self.boot.mft_record_size;
+        let virt = n
+            .checked_mul(rec_size)
+            .ok_or(NtfsError::BadRunlist("record offset overflow"))?;
+        let mut buf = read_virtual(
+            &mut self.reader,
+            &self.mft_runs,
+            self.boot.cluster_size(),
+            virt,
+            rec_size,
+        )?;
+        apply_fixup(&mut buf, self.boot.bytes_per_sector as usize)?;
+        Ok(buf)
     }
 
     /// List a directory's child entries (those carrying a `$FILE_NAME`).
@@ -61,8 +88,49 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// [`NtfsError::NotADirectory`] if the record has no `$INDEX_ROOT`, plus
     /// index errors.
     pub fn directory_entries(&mut self, record: &[u8]) -> Result<Vec<IndexEntry>> {
-        let _ = (record, IndexRoot::parse as fn(&[u8]) -> _);
-        todo!("NtfsFs::directory_entries — GREEN step")
+        let attrs = record_attributes(record)?;
+
+        let root_attr = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::INDEX_ROOT)
+            .ok_or_else(|| NtfsError::NotADirectory("record has no $INDEX_ROOT".to_string()))?;
+        let root_content = root_attr
+            .resident_content(record)
+            .ok_or(NtfsError::BadIndex("$INDEX_ROOT content out of bounds"))?;
+        let root = IndexRoot::parse(root_content)?;
+
+        let mut out: Vec<IndexEntry> = root
+            .entries
+            .into_iter()
+            .filter(|e| e.file_name.is_some())
+            .collect();
+
+        if root.is_large {
+            if let Some(alloc) = attrs
+                .iter()
+                .find(|a| a.type_code == attr_types::INDEX_ALLOCATION)
+            {
+                let data = read_attribute_value(
+                    &mut self.reader,
+                    record,
+                    alloc,
+                    self.boot.cluster_size(),
+                )?;
+                let irs = self.boot.index_record_size as usize;
+                let mut off = 0;
+                while off + irs <= data.len() {
+                    if &data[off..off + 4] == b"INDX" {
+                        let mut buf = data[off..off + irs].to_vec();
+                        let entries =
+                            parse_index_buffer(&mut buf, irs, self.boot.bytes_per_sector as usize)?;
+                        out.extend(entries.into_iter().filter(|e| e.file_name.is_some()));
+                    }
+                    off += irs;
+                }
+            }
+        }
+
+        Ok(out)
     }
 
     /// Resolve a `\`- or `/`-separated path to an MFT record number.
@@ -71,8 +139,21 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] for a missing component.
     pub fn resolve_path(&mut self, path: &str) -> Result<u64> {
-        let _ = (path, mft_records::ROOT);
-        todo!("NtfsFs::resolve_path — GREEN step")
+        let mut current = mft_records::ROOT;
+        for component in path.split(['\\', '/']).filter(|c| !c.is_empty()) {
+            let record = self.read_record(current)?;
+            let entries = self.directory_entries(&record)?;
+            current = entries
+                .iter()
+                .find_map(|e| {
+                    e.file_name
+                        .as_ref()
+                        .filter(|f| f.name.eq_ignore_ascii_case(component))
+                        .map(|_| e.file_reference.record_number)
+                })
+                .ok_or_else(|| NtfsError::NotFound(component.to_string()))?;
+        }
+        Ok(current)
     }
 
     /// Read a file's unnamed `$DATA` by path.
@@ -81,9 +162,21 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        let _ = (path, read_attribute_value::<R> as fn(&mut R, &[u8], &Attribute, u64) -> _);
-        todo!("NtfsFs::read_file — GREEN step")
+        let rec_num = self.resolve_path(path)?;
+        let record = self.read_record(rec_num)?;
+        let attrs = record_attributes(&record)?;
+        let data = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::DATA && a.name.is_none())
+            .ok_or_else(|| NtfsError::NotFound(format!("{path}::$DATA")))?;
+        read_attribute_value(&mut self.reader, &record, data, self.boot.cluster_size())
     }
+}
+
+/// Parse a record's header and return its attributes.
+fn record_attributes(record: &[u8]) -> Result<Vec<Attribute>> {
+    let header = MftRecordHeader::parse(record)?;
+    parse_attributes(record, header.first_attribute_offset as usize)
 }
 
 /// Extract the unnamed non-resident `$DATA` runlist from a fixed-up record.
@@ -95,12 +188,10 @@ fn mft_data_runs(record: &[u8]) -> Result<Vec<Run>> {
             if let AttributeBody::NonResident { runs_offset, .. } = a.body {
                 let start = a.offset + runs_offset as usize;
                 let end = a.offset + a.length as usize;
-                let rl = record
-                    .get(start..end)
-                    .ok_or(NtfsError::BadAttribute {
-                        offset: a.offset,
-                        detail: "$MFT runlist out of bounds",
-                    })?;
+                let rl = record.get(start..end).ok_or(NtfsError::BadAttribute {
+                    offset: a.offset,
+                    detail: "$MFT runlist out of bounds",
+                })?;
                 return runlist::decode(rl);
             }
         }
@@ -315,7 +406,10 @@ mod tests {
 
         // record 0: $MFT with a non-resident $DATA covering the whole MFT.
         let runs = [0x11u8, mft_clusters as u8, MFT_LCN as u8, 0x00]; // len 1B, off 1B
-        let rec0 = build_record(0x0001, &nonresident_data(&runs, mft_clusters * CLUSTER as u64));
+        let rec0 = build_record(
+            0x0001,
+            &nonresident_data(&runs, mft_clusters * CLUSTER as u64),
+        );
 
         // record 5: root directory with one child "test.txt" → record 6.
         let root_index = index_root(&[index_entry(6, "test.txt"), index_end()]);
