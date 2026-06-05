@@ -19,7 +19,7 @@ thiserror = "2"
 # NTFS on-disk structure knowledge (magic, offsets, type codes) lives in the
 # KNOWLEDGE layer. Once forensicnomicon is feature-gated this becomes
 # `{ default-features = false, features = ["filesystems"] }` for a lean slice.
-forensicnomicon = { path = "../forensicnomicon", version = "0.1" }
+forensicnomicon = { path = "../forensicnomicon", version = "0.2" }
 
 [dev-dependencies]
 # Independent oracles for doer-checker validation against real images are added
