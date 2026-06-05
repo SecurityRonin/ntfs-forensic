@@ -16,6 +16,11 @@ use crate::error::{NtfsError, Result};
 /// Maximum bytes a single decompression may produce — an allocation-bomb guard.
 const MAX_OUTPUT: usize = 1 << 30; // 1 GiB
 
+/// LZNT1 decodes each chunk into at most a 4 KiB window. This bound is what
+/// keeps the back-reference bit-split (`length_bits`) at most 12, so the
+/// `1u16 << length_bits` shift can never overflow.
+const CHUNK_MAX: usize = 4096;
+
 /// Decompress an LZNT1 byte stream.
 ///
 /// # Errors
@@ -80,6 +85,9 @@ fn decompress_chunk(chunk: &[u8], out: &mut Vec<u8>) -> Result<()> {
                 let produced = out.len() - chunk_start;
                 if produced == 0 {
                     return Err(NtfsError::BadCompression("back-reference at chunk start"));
+                }
+                if produced > CHUNK_MAX {
+                    return Err(NtfsError::BadCompression("chunk decodes past 4 KiB window"));
                 }
 
                 // The length/offset bit-split widens as the chunk fills.
@@ -225,18 +233,21 @@ mod tests {
         // A single compressed chunk that tries to expand beyond the 4 KiB
         // window via run-length must be rejected, not allowed to run away.
         let mut body = vec![0x01u8, b'x']; // flag: 1 back-ref-or-literal; seed
-        // Pad with run-length tokens that each repeat the window; the decoder
-        // must stop at 4096 and report BadCompression rather than looping out.
+                                           // Pad with run-length tokens that each repeat the window; the decoder
+                                           // must stop at 4096 and report BadCompression rather than looping out.
         body[0] = 0x02; // bit0 literal 'x', bit1 back-ref
         let token: u16 = 0x07; // offset 1, length 10 at length_bits=4
         body.extend_from_slice(&token.to_le_bytes());
-        for _ in 0..600 {
-            body.push(0xFF); // all-back-ref flag byte
-            for _ in 0..8 {
-                body.extend_from_slice(&token.to_le_bytes());
-            }
+        let mut group = vec![0xFFu8]; // all-back-ref flag byte + 8 tokens
+        for _ in 0..8 {
+            group.extend_from_slice(&token.to_le_bytes());
         }
-        let mut stream = (0x8000u16 | (3 << 12) | ((body.len() - 1) as u16)).to_le_bytes().to_vec();
+        for _ in 0..600 {
+            body.extend_from_slice(&group);
+        }
+        let mut stream = (0x8000u16 | (3 << 12) | ((body.len() - 1) as u16))
+            .to_le_bytes()
+            .to_vec();
         stream.extend_from_slice(&body);
         stream.extend_from_slice(&0u16.to_le_bytes());
         assert!(matches!(
