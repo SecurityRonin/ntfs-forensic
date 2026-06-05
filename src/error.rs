@@ -57,6 +57,10 @@ pub enum NtfsError {
     #[error("malformed runlist: {0}")]
     BadRunlist(&'static str),
 
+    /// A directory index node or entry is malformed.
+    #[error("malformed index: {0}")]
+    BadIndex(&'static str),
+
     /// A structure declared a size that would require an unreasonable
     /// allocation — refused rather than attempted (defends against crafted
     /// sizes / allocation bombs).
