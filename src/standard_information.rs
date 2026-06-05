@@ -15,19 +15,9 @@ const SI_MIN: usize = 0x30;
 /// Content length at which NTFS 3.0+ fields (owner/security/quota/usn) appear.
 const SI_V3: usize = 0x48;
 
-/// Windows `FILE_ATTRIBUTE_*` flags (shared with `$FILE_NAME`).
-// TODO(forensicnomicon): migrate to forensicnomicon::ntfs::file_attributes.
-pub mod file_attr {
-    pub const READONLY: u32 = 0x0001;
-    pub const HIDDEN: u32 = 0x0002;
-    pub const SYSTEM: u32 = 0x0004;
-    pub const ARCHIVE: u32 = 0x0020;
-    pub const TEMPORARY: u32 = 0x0100;
-    pub const SPARSE_FILE: u32 = 0x0200;
-    pub const REPARSE_POINT: u32 = 0x0400;
-    pub const COMPRESSED: u32 = 0x0800;
-    pub const ENCRYPTED: u32 = 0x4000;
-}
+/// Windows `FILE_ATTRIBUTE_*` flags (shared with `$FILE_NAME`), from the
+/// KNOWLEDGE layer. Re-exported under the historical `file_attr` name.
+pub use forensicnomicon::ntfs::file_attributes as file_attr;
 
 /// Parsed `$STANDARD_INFORMATION` value.
 #[derive(Debug, Clone, PartialEq, Eq)]

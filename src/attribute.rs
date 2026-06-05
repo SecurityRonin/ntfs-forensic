@@ -11,43 +11,14 @@
 //! declared length: a crafted record can never drive an out-of-bounds read or
 //! an unbounded loop.
 //!
-//! Type codes and names come from [`forensicnomicon::ntfs`]; the attribute
-//! *header* field offsets/flags are defined locally for now and will move to
-//! the knowledge layer once it is free.
+//! Type codes, names, attribute-header field offsets, and flags all come from
+//! the [`forensicnomicon::ntfs`] KNOWLEDGE layer.
 
-use forensicnomicon::ntfs::{attr_types, attribute_type_name};
+use forensicnomicon::ntfs::{
+    attr_flags as flag, attr_offsets as o, attr_types, attribute_type_name,
+};
 
 use crate::error::{NtfsError, Result};
-
-// TODO(forensicnomicon): migrate these layout facts to forensicnomicon::ntfs
-// (e.g. `attr_offsets` / `attr_flags`) once the knowledge layer is editable.
-mod o {
-    // Common header.
-    pub const TYPE: usize = 0x00;
-    pub const LENGTH: usize = 0x04;
-    pub const NON_RESIDENT: usize = 0x08;
-    pub const NAME_LENGTH: usize = 0x09;
-    pub const NAME_OFFSET: usize = 0x0A;
-    pub const FLAGS: usize = 0x0C;
-    pub const ATTRIBUTE_ID: usize = 0x0E;
-    // Resident body.
-    pub const RES_CONTENT_LENGTH: usize = 0x10;
-    pub const RES_CONTENT_OFFSET: usize = 0x14;
-    // Non-resident body.
-    pub const NR_START_VCN: usize = 0x10;
-    pub const NR_LAST_VCN: usize = 0x18;
-    pub const NR_RUNS_OFFSET: usize = 0x20;
-    pub const NR_COMPRESSION_UNIT: usize = 0x22;
-    pub const NR_ALLOCATED_SIZE: usize = 0x28;
-    pub const NR_REAL_SIZE: usize = 0x30;
-    pub const NR_INITIALIZED_SIZE: usize = 0x38;
-}
-
-mod flag {
-    pub const COMPRESSED: u16 = 0x0001;
-    pub const ENCRYPTED: u16 = 0x4000;
-    pub const SPARSE: u16 = 0x8000;
-}
 
 /// Minimum bytes of a common attribute header (through attribute id).
 const HEADER_MIN: usize = 0x10;

@@ -10,13 +10,11 @@
 //! Entry, node, and stream bounds are all validated against the buffer; a
 //! crafted index cannot drive an out-of-bounds read or a non-terminating walk.
 
+use forensicnomicon::ntfs::SIGNATURE_INDX as INDX_SIGNATURE;
+
 use crate::error::{NtfsError, Result};
 use crate::file_name::{FileName, FileReference};
 use crate::record::apply_fixup;
-
-/// `INDX` index-buffer signature.
-// TODO(forensicnomicon): migrate to forensicnomicon::ntfs::SIGNATURE_INDX.
-const INDX_SIGNATURE: [u8; 4] = *b"INDX";
 
 /// Index-header field offsets (relative to the index header start).
 mod ih {
