@@ -73,8 +73,34 @@ impl StandardInformation {
     ///
     /// [`NtfsError::TooShort`] when `content` is smaller than the minimum.
     pub fn parse(content: &[u8]) -> Result<StandardInformation> {
-        let _ = (content, SI_MIN, SI_V3);
-        todo!("$STANDARD_INFORMATION parse — GREEN step")
+        if content.len() < SI_MIN {
+            return Err(NtfsError::TooShort {
+                what: "$STANDARD_INFORMATION",
+                need: SI_MIN,
+                got: content.len(),
+            });
+        }
+        let ft = |o: usize| Filetime::from_le(content[o..o + 8].try_into().unwrap());
+        let file_attributes = u32::from_le_bytes(content[0x20..0x24].try_into().unwrap());
+
+        let (security_id, usn) = if content.len() >= SI_V3 {
+            (
+                Some(u32::from_le_bytes(content[0x34..0x38].try_into().unwrap())),
+                Some(u64::from_le_bytes(content[0x40..0x48].try_into().unwrap())),
+            )
+        } else {
+            (None, None)
+        };
+
+        Ok(StandardInformation {
+            created: ft(0x00),
+            modified: ft(0x08),
+            mft_modified: ft(0x10),
+            accessed: ft(0x18),
+            file_attributes,
+            security_id,
+            usn,
+        })
     }
 }
 

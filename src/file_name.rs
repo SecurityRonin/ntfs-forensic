@@ -29,8 +29,10 @@ impl FileReference {
     /// Split a little-endian 64-bit reference into record number + sequence.
     #[must_use]
     pub fn from_u64(raw: u64) -> Self {
-        let _ = raw;
-        todo!("file reference split — GREEN step")
+        FileReference {
+            record_number: raw & 0x0000_FFFF_FFFF_FFFF,
+            sequence: (raw >> 48) as u16,
+        }
     }
 }
 
@@ -80,8 +82,60 @@ impl FileName {
     /// [`NtfsError::TooShort`] when smaller than the fixed header, or
     /// [`NtfsError::BadAttribute`] when the name runs past the content.
     pub fn parse(content: &[u8]) -> Result<FileName> {
-        let _ = (content, FN_MIN);
-        todo!("$FILE_NAME parse — GREEN step")
+        if content.len() < FN_MIN {
+            return Err(NtfsError::TooShort {
+                what: "$FILE_NAME",
+                need: FN_MIN,
+                got: content.len(),
+            });
+        }
+
+        let parent =
+            FileReference::from_u64(u64::from_le_bytes(content[0x00..0x08].try_into().unwrap()));
+        let ft = |o: usize| Filetime::from_le(content[o..o + 8].try_into().unwrap());
+        let allocated_size = u64::from_le_bytes(content[0x28..0x30].try_into().unwrap());
+        let real_size = u64::from_le_bytes(content[0x30..0x38].try_into().unwrap());
+        let flags = u32::from_le_bytes(content[0x38..0x3C].try_into().unwrap());
+
+        let name_length = content[0x40] as usize;
+        let namespace = content[0x41];
+        let name_bytes = name_length.checked_mul(2).ok_or(NtfsError::BadAttribute {
+            offset: 0,
+            detail: "$FILE_NAME name length overflow",
+        })?;
+        let name_end = FN_MIN
+            .checked_add(name_bytes)
+            .ok_or(NtfsError::BadAttribute {
+                offset: 0,
+                detail: "$FILE_NAME name overflow",
+            })?;
+        if name_end > content.len() {
+            return Err(NtfsError::BadAttribute {
+                offset: 0,
+                detail: "$FILE_NAME name extends past content",
+            });
+        }
+
+        let units: Vec<u16> = content[FN_MIN..name_end]
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let name = char::decode_utf16(units)
+            .map(|r| r.unwrap_or('\u{FFFD}'))
+            .collect();
+
+        Ok(FileName {
+            parent,
+            created: ft(0x08),
+            modified: ft(0x10),
+            mft_modified: ft(0x18),
+            accessed: ft(0x20),
+            allocated_size,
+            real_size,
+            flags,
+            namespace,
+            name,
+        })
     }
 }
 
@@ -89,6 +143,7 @@ impl FileName {
 mod tests {
     use super::*;
 
+    #[allow(clippy::too_many_arguments)]
     fn make_fn(
         parent: u64,
         created: u64,
@@ -158,7 +213,18 @@ mod tests {
 
     #[test]
     fn detects_dos_namespace() {
-        let c = make_fn(0, 0, 0, 0, 0, 0, 0, 0, filename_namespace::DOS, "REPORT~1.DOC");
+        let c = make_fn(
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            filename_namespace::DOS,
+            "REPORT~1.DOC",
+        );
         let f = FileName::parse(&c).unwrap();
         assert!(f.is_dos_namespace());
     }

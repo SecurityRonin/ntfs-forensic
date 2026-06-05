@@ -28,14 +28,14 @@ impl Filetime {
     /// Whole seconds since the Unix epoch (may be negative for pre-1970 times).
     #[must_use]
     pub fn to_unix_seconds(&self) -> i64 {
-        let _ = FILETIME_TO_UNIX_100NS;
-        todo!("FILETIME → unix seconds — GREEN step")
+        let ticks_since_unix = i128::from(self.0) - FILETIME_TO_UNIX_100NS;
+        (ticks_since_unix / 10_000_000) as i64
     }
 
     /// Nanoseconds since the Unix epoch (`i128` to span the full FILETIME range).
     #[must_use]
     pub fn to_unix_nanos(&self) -> i128 {
-        todo!("FILETIME → unix nanos — GREEN step")
+        (i128::from(self.0) - FILETIME_TO_UNIX_100NS) * 100
     }
 }
 
