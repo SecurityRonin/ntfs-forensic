@@ -12,8 +12,23 @@
 //!
 //! ## Status
 //!
-//! Built incrementally under strict TDD. Currently implemented:
+//! Built incrementally under strict TDD. Implemented:
 //! - [`boot::BootSector`] — the Volume Boot Record (BPB / extended BPB).
+//! - [`record::MftRecordHeader`] + [`record::apply_fixup`] — FILE records and
+//!   the update-sequence-array fixup.
+//! - [`attribute::parse_attributes`] — resident and non-resident attributes.
+//! - [`standard_information`] / [`file_name`] — the two timestamp sets.
+//! - [`runlist::decode`] + [`data::read_attribute_value`] — data runs.
+//! - [`index`] — directory `$INDEX_ROOT` / INDX buffers.
+//! - [`attribute_list`] — fragmented-file extension records.
+//! - [`compress::decompress`] — LZNT1.
+//! - [`fs::NtfsFs`] — path resolution and file read over any `Read + Seek`.
+//! - [`source::OffsetReader`] — open a partition inside a whole-disk image.
+//! - [`forensic`] — Tier-2: timestomp, ADS, slack, deleted-record carving.
+//!
+//! Hardened against crafted input and exercised by `cargo-fuzz`
+//! (see `fuzz/`); the boot parser is cross-validated against The Sleuth Kit on
+//! a real disk image (see `tests/real_image.rs`).
 
 #![forbid(unsafe_code)]
 
