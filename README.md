@@ -174,8 +174,10 @@ cargo llvm-cov --lib --show-missing-lines
 
 | Crate | Role |
 |---|---|
+| [`disk-forensic`](https://github.com/SecurityRonin/disk-forensic) | **Orchestrator** — auto-detects MBR / GPT / APM and yields each partition's offset / length |
 | [`mbr-forensic`](https://github.com/SecurityRonin/mbr-forensic) | MBR partition table → NTFS partition offset / length |
 | [`gpt-forensic`](https://github.com/SecurityRonin/gpt-forensic) | GPT partition table → NTFS partition offset / length |
+| [`apm-forensic`](https://github.com/SecurityRonin/apm-forensic) | Apple Partition Map (classic Mac / hybrid media — rarely hosts NTFS) |
 | [`ewf-forensic`](https://github.com/SecurityRonin/ewf-forensic) | E01 / Expert Witness Format container |
 | [`vhdx-forensic`](https://github.com/SecurityRonin/vhdx-forensic) | VHDX container |
 
