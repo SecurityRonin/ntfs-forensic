@@ -42,8 +42,14 @@ impl TimestompIndicators {
 /// attributes for timestomping indicators.
 #[must_use]
 pub fn detect_timestomp(si: &StandardInformation, file_name: &FileName) -> TimestompIndicators {
-    let _ = (si, file_name, TICKS_PER_SECOND, whole_second);
-    todo!("timestomp detection — GREEN step")
+    TimestompIndicators {
+        si_created_before_fn: si.created.0 < file_name.created.0,
+        created_mismatch: si.created.0 != file_name.created.0,
+        si_whole_second: whole_second(si.created)
+            || whole_second(si.modified)
+            || whole_second(si.mft_modified)
+            || whole_second(si.accessed),
+    }
 }
 
 /// `true` when a timestamp is non-zero yet lands exactly on a whole second.
@@ -54,16 +60,18 @@ fn whole_second(ft: Filetime) -> bool {
 /// The named `$DATA` attributes of a file — its alternate data streams.
 #[must_use]
 pub fn alternate_data_streams(attributes: &[Attribute]) -> Vec<&Attribute> {
-    let _ = (attributes, attr_types::DATA);
-    todo!("ADS enumeration — GREEN step")
+    attributes
+        .iter()
+        .filter(|a| a.type_code == attr_types::DATA && a.name.is_some())
+        .collect()
 }
 
 /// The slack of an MFT record: the bytes from the record's used size to its end,
 /// which may hold residue from a previously-resident attribute.
 #[must_use]
 pub fn record_slack<'a>(record: &'a [u8], header: &MftRecordHeader) -> &'a [u8] {
-    let _ = (record, header);
-    todo!("record slack — GREEN step")
+    let used = header.used_size as usize;
+    record.get(used..).unwrap_or(&[])
 }
 
 /// `true` if the record is not currently allocated (a deleted file).
@@ -76,8 +84,19 @@ pub fn is_deleted(header: &MftRecordHeader) -> bool {
 /// boundaries, returning the offset of each.
 #[must_use]
 pub fn carve_file_records(mft: &[u8], record_size: usize) -> Vec<usize> {
-    let _ = (mft, record_size, SIGNATURE_FILE, SIGNATURE_BAAD);
-    todo!("MFT carving — GREEN step")
+    if record_size == 0 {
+        return Vec::new();
+    }
+    let mut offsets = Vec::new();
+    let mut pos = 0;
+    while pos + 4 <= mft.len() {
+        let sig = &mft[pos..pos + 4];
+        if sig == SIGNATURE_FILE || sig == SIGNATURE_BAAD {
+            offsets.push(pos);
+        }
+        pos += record_size;
+    }
+    offsets
 }
 
 #[cfg(test)]
@@ -156,7 +175,11 @@ mod tests {
 
     #[test]
     fn finds_alternate_data_streams() {
-        let attrs = [data_attr(None), data_attr(Some("Zone.Identifier")), data_attr(Some("evil"))];
+        let attrs = [
+            data_attr(None),
+            data_attr(Some("Zone.Identifier")),
+            data_attr(Some("evil")),
+        ];
         let ads = alternate_data_streams(&attrs);
         assert_eq!(ads.len(), 2);
         assert_eq!(ads[0].name.as_deref(), Some("Zone.Identifier"));
@@ -214,7 +237,7 @@ mod tests {
         let mut mft = vec![0u8; rec * 4];
         mft[0..4].copy_from_slice(b"FILE"); // record 0
         mft[2 * rec..2 * rec + 4].copy_from_slice(b"BAAD"); // record 2 (corrupt)
-        // record 1 and 3 are zeroed (no signature)
+                                                            // record 1 and 3 are zeroed (no signature)
         let offsets = carve_file_records(&mft, rec);
         assert_eq!(offsets, vec![0, 2 * rec]);
     }
