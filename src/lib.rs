@@ -18,7 +18,9 @@
 #![forbid(unsafe_code)]
 
 pub mod attribute;
+pub mod attribute_list;
 pub mod boot;
+pub mod compress;
 pub mod data;
 pub mod error;
 pub mod file_name;
@@ -30,7 +32,9 @@ pub mod standard_information;
 pub mod time;
 
 pub use attribute::{parse_attributes, Attribute, AttributeBody};
+pub use attribute_list::{parse as parse_attribute_list, AttributeListEntry};
 pub use boot::BootSector;
+pub use compress::decompress;
 pub use data::{read_attribute_value, read_runs};
 pub use error::{NtfsError, Result};
 pub use file_name::{FileName, FileReference};

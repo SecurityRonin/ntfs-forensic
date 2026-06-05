@@ -61,6 +61,14 @@ pub enum NtfsError {
     #[error("malformed index: {0}")]
     BadIndex(&'static str),
 
+    /// LZNT1-compressed data is malformed.
+    #[error("malformed compressed data: {0}")]
+    BadCompression(&'static str),
+
+    /// An `$ATTRIBUTE_LIST` entry is malformed.
+    #[error("malformed attribute list: {0}")]
+    BadAttributeList(&'static str),
+
     /// A path component was not found.
     #[error("path not found: {0}")]
     NotFound(String),
