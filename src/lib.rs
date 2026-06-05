@@ -20,9 +20,15 @@
 pub mod attribute;
 pub mod boot;
 pub mod error;
+pub mod file_name;
 pub mod record;
+pub mod standard_information;
+pub mod time;
 
 pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use boot::BootSector;
 pub use error::{NtfsError, Result};
+pub use file_name::{FileName, FileReference};
 pub use record::{apply_fixup, MftRecordHeader};
+pub use standard_information::StandardInformation;
+pub use time::Filetime;
