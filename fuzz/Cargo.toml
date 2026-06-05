@@ -1,0 +1,66 @@
+[package]
+name = "ntfs-forensic-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.ntfs-forensic]
+path = ".."
+
+[[bin]]
+name = "boot"
+path = "fuzz_targets/boot.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "record"
+path = "fuzz_targets/record.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attributes"
+path = "fuzz_targets/attributes.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "runlist"
+path = "fuzz_targets/runlist.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "index_buffer"
+path = "fuzz_targets/index_buffer.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "compress"
+path = "fuzz_targets/compress.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "attribute_list"
+path = "fuzz_targets/attribute_list.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1

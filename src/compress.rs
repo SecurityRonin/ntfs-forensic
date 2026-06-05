@@ -202,6 +202,50 @@ mod tests {
     }
 
     #[test]
+    fn fuzzer_crash_no_chunk_overflow() {
+        // Regression: a crafted stream whose chunk decodes past 32 KiB drove
+        // `length_bits` over 16 and overflowed `1u16 << length_bits`. A chunk
+        // must decode to at most 4096 bytes; this input must error, not panic.
+        let crash = [
+            0x4a, 0xc0, 0x36, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0a, 0x00, 0x1a, 0x00, 0x4a,
+            0xc0, 0x36, 0x36, 0x09, 0x00, 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18,
+            0x18, 0x18, 0x18, 0x00, 0x00, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18, 0x18,
+            0x18, 0x18, 0x18, 0x18, 0x00, 0x00, 0x0a, 0x00, 0x1a, 0x00, 0x4a, 0xc0, 0x36, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0x01, 0x00, 0x41, 0xff, 0x00, 0x40, 0x00, 0x00, 0x40, 0x00, 0x00,
+            0x40, 0x01, 0xff, 0x51, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff,
+        ];
+        // Must not panic; whatever it returns is fine.
+        let _ = decompress(&crash);
+    }
+
+    #[test]
+    fn rejects_chunk_decoding_past_4096() {
+        // A single compressed chunk that tries to expand beyond the 4 KiB
+        // window via run-length must be rejected, not allowed to run away.
+        let mut body = vec![0x01u8, b'x']; // flag: 1 back-ref-or-literal; seed
+        // Pad with run-length tokens that each repeat the window; the decoder
+        // must stop at 4096 and report BadCompression rather than looping out.
+        body[0] = 0x02; // bit0 literal 'x', bit1 back-ref
+        let token: u16 = 0x07; // offset 1, length 10 at length_bits=4
+        body.extend_from_slice(&token.to_le_bytes());
+        for _ in 0..600 {
+            body.push(0xFF); // all-back-ref flag byte
+            for _ in 0..8 {
+                body.extend_from_slice(&token.to_le_bytes());
+            }
+        }
+        let mut stream = (0x8000u16 | (3 << 12) | ((body.len() - 1) as u16)).to_le_bytes().to_vec();
+        stream.extend_from_slice(&body);
+        stream.extend_from_slice(&0u16.to_le_bytes());
+        assert!(matches!(
+            decompress(&stream),
+            Err(NtfsError::BadCompression(_))
+        ));
+    }
+
+    #[test]
     fn rejects_truncated_chunk() {
         // Header claims 10 bytes follow, but the input is shorter.
         let header = 0x8000u16 | (3 << 12) | 9;
