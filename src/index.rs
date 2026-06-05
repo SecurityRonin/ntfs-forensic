@@ -79,9 +79,48 @@ impl IndexRoot {
     ///
     /// [`NtfsError::TooShort`] / [`NtfsError::BadIndex`] on malformed input.
     pub fn parse(content: &[u8]) -> Result<IndexRoot> {
-        let _ = (content, ROOT_HEADER_LEN, IH_FLAG_LARGE);
-        todo!("$INDEX_ROOT parse — GREEN step")
+        if content.len() < ROOT_HEADER_LEN + INDEX_HEADER_LEN {
+            return Err(NtfsError::TooShort {
+                what: "$INDEX_ROOT",
+                need: ROOT_HEADER_LEN + INDEX_HEADER_LEN,
+                got: content.len(),
+            });
+        }
+        let indexed_type = u32::from_le_bytes(content[0x00..0x04].try_into().unwrap());
+        let (entries, is_large) = parse_index_header(content, ROOT_HEADER_LEN)?;
+        Ok(IndexRoot {
+            indexed_type,
+            is_large,
+            entries,
+        })
     }
+}
+
+/// Parse the index header at `base` and the entries it points to.
+/// Returns the entries and the "large index" flag.
+fn parse_index_header(node: &[u8], base: usize) -> Result<(Vec<IndexEntry>, bool)> {
+    let header_end = base
+        .checked_add(INDEX_HEADER_LEN)
+        .ok_or(NtfsError::BadIndex("index header overflow"))?;
+    if header_end > node.len() {
+        return Err(NtfsError::BadIndex("index header past buffer"));
+    }
+    let u32at = |o: usize| u32::from_le_bytes(node[base + o..base + o + 4].try_into().unwrap());
+    let first_entry = u32at(ih::FIRST_ENTRY) as usize;
+    let total_size = u32at(ih::TOTAL_SIZE) as usize;
+    let is_large = u32at(ih::FLAGS) & IH_FLAG_LARGE != 0;
+
+    let start = base
+        .checked_add(first_entry)
+        .ok_or(NtfsError::BadIndex("first-entry offset overflow"))?;
+    let end = base
+        .checked_add(total_size)
+        .ok_or(NtfsError::BadIndex("total-size overflow"))?;
+    if start < header_end || end > node.len() || start > end {
+        return Err(NtfsError::BadIndex("index entry region out of bounds"));
+    }
+    let entries = parse_entries(node, start, end)?;
+    Ok((entries, is_large))
 }
 
 /// Parse the entries in the byte range `[start, end)` of `node`.
@@ -91,8 +130,82 @@ impl IndexRoot {
 /// [`NtfsError::BadIndex`] for an undersized / non-advancing entry, or a stream
 /// or sub-node VCN that would read outside the entry.
 pub fn parse_entries(node: &[u8], start: usize, end: usize) -> Result<Vec<IndexEntry>> {
-    let _ = (node, start, end, MAX_ENTRIES, INDEX_HEADER_LEN);
-    todo!("index entry walk — GREEN step")
+    if end > node.len() || start > end {
+        return Err(NtfsError::BadIndex("entry region out of bounds"));
+    }
+    let mut entries = Vec::new();
+    let mut pos = start;
+
+    for _ in 0..MAX_ENTRIES {
+        if pos + ENTRY_MIN > end {
+            break; // no room for another entry header
+        }
+        let entry_length = u16::from_le_bytes(
+            node[pos + ie::ENTRY_LENGTH..pos + ie::ENTRY_LENGTH + 2]
+                .try_into()
+                .unwrap(),
+        ) as usize;
+        if entry_length < ENTRY_MIN {
+            return Err(NtfsError::BadIndex("entry length below minimum"));
+        }
+        let entry_end = pos
+            .checked_add(entry_length)
+            .ok_or(NtfsError::BadIndex("entry length overflow"))?;
+        if entry_end > end {
+            return Err(NtfsError::BadIndex("entry extends past node"));
+        }
+
+        let flags = node[pos + ie::FLAGS];
+        let is_last = flags & IE_FLAG_LAST != 0;
+        let file_reference = FileReference::from_u64(u64::from_le_bytes(
+            node[pos + ie::FILE_REFERENCE..pos + ie::FILE_REFERENCE + 8]
+                .try_into()
+                .unwrap(),
+        ));
+
+        let child_vcn = if flags & IE_FLAG_SUBNODE != 0 {
+            if entry_end < pos + ENTRY_MIN + 8 {
+                return Err(NtfsError::BadIndex("sub-node VCN does not fit in entry"));
+            }
+            let vcn_pos = entry_end - 8;
+            Some(u64::from_le_bytes(
+                node[vcn_pos..vcn_pos + 8].try_into().unwrap(),
+            ))
+        } else {
+            None
+        };
+
+        let file_name = if is_last {
+            None
+        } else {
+            let stream_length = u16::from_le_bytes(
+                node[pos + ie::STREAM_LENGTH..pos + ie::STREAM_LENGTH + 2]
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            let s_start = pos + ie::STREAM;
+            let s_end = s_start
+                .checked_add(stream_length)
+                .ok_or(NtfsError::BadIndex("stream length overflow"))?;
+            if s_end > entry_end {
+                return Err(NtfsError::BadIndex("stream extends past entry"));
+            }
+            Some(FileName::parse(&node[s_start..s_end])?)
+        };
+
+        entries.push(IndexEntry {
+            file_reference,
+            file_name,
+            child_vcn,
+        });
+
+        if is_last {
+            break;
+        }
+        pos = entry_end;
+    }
+
+    Ok(entries)
 }
 
 /// Parse one `INDX` index buffer: validate the signature, apply the
@@ -107,8 +220,20 @@ pub fn parse_index_buffer(
     index_record_size: usize,
     sector_size: usize,
 ) -> Result<Vec<IndexEntry>> {
-    let _ = (buffer, index_record_size, sector_size, INDX_SIGNATURE, INDX_HEADER_LEN, apply_fixup);
-    todo!("INDX buffer parse — GREEN step")
+    if buffer.len() < index_record_size || index_record_size < INDX_HEADER_LEN + INDEX_HEADER_LEN {
+        return Err(NtfsError::TooShort {
+            what: "INDX buffer",
+            need: index_record_size.max(INDX_HEADER_LEN + INDEX_HEADER_LEN),
+            got: buffer.len(),
+        });
+    }
+    let buf = &mut buffer[..index_record_size];
+    if buf[0..4] != INDX_SIGNATURE {
+        return Err(NtfsError::BadIndex("INDX signature missing"));
+    }
+    apply_fixup(buf, sector_size)?;
+    let (entries, _is_large) = parse_index_header(buf, INDX_HEADER_LEN)?;
+    Ok(entries)
 }
 
 #[cfg(test)]
@@ -134,7 +259,8 @@ mod tests {
         let mut e = vec![0u8; len];
         e[ie::FILE_REFERENCE..ie::FILE_REFERENCE + 8].copy_from_slice(&file_ref.to_le_bytes());
         e[ie::ENTRY_LENGTH..ie::ENTRY_LENGTH + 2].copy_from_slice(&(len as u16).to_le_bytes());
-        e[ie::STREAM_LENGTH..ie::STREAM_LENGTH + 2].copy_from_slice(&(fnc.len() as u16).to_le_bytes());
+        e[ie::STREAM_LENGTH..ie::STREAM_LENGTH + 2]
+            .copy_from_slice(&(fnc.len() as u16).to_le_bytes());
         e[ie::FLAGS] = 0;
         e[ie::STREAM..ie::STREAM + fnc.len()].copy_from_slice(&fnc);
         e
@@ -142,7 +268,8 @@ mod tests {
 
     fn end_entry() -> Vec<u8> {
         let mut e = vec![0u8; ENTRY_MIN];
-        e[ie::ENTRY_LENGTH..ie::ENTRY_LENGTH + 2].copy_from_slice(&(ENTRY_MIN as u16).to_le_bytes());
+        e[ie::ENTRY_LENGTH..ie::ENTRY_LENGTH + 2]
+            .copy_from_slice(&(ENTRY_MIN as u16).to_le_bytes());
         e[ie::FLAGS] = IE_FLAG_LAST;
         e
     }
@@ -180,7 +307,10 @@ mod tests {
         assert_eq!(ir.indexed_type, 0x30);
         assert!(!ir.is_large);
         assert_eq!(ir.entries.len(), 2);
-        assert_eq!(ir.entries[0].file_name.as_ref().unwrap().name, "report.docx");
+        assert_eq!(
+            ir.entries[0].file_name.as_ref().unwrap().name,
+            "report.docx"
+        );
     }
 
     #[test]
@@ -191,14 +321,18 @@ mod tests {
 
     #[test]
     fn subnode_vcn_is_read() {
-        // An entry with the sub-node flag carries a child VCN in its last 8 bytes.
+        // A sub-node entry reserves 8 extra bytes after the $FILE_NAME stream
+        // for the child VCN (the stream length is unchanged).
         let mut e = entry(30, "dir");
-        let len = e.len();
+        let new_len = e.len() + 8;
+        e.resize(new_len, 0);
+        e[ie::ENTRY_LENGTH..ie::ENTRY_LENGTH + 2].copy_from_slice(&(new_len as u16).to_le_bytes());
         e[ie::FLAGS] = IE_FLAG_SUBNODE;
-        e[len - 8..len].copy_from_slice(&7u64.to_le_bytes());
+        e[new_len - 8..new_len].copy_from_slice(&7u64.to_le_bytes());
         let node = [e, end_entry()].concat();
         let es = parse_entries(&node, 0, node.len()).unwrap();
         assert_eq!(es[0].child_vcn, Some(7));
+        assert_eq!(es[0].file_name.as_ref().unwrap().name, "dir");
     }
 
     #[test]
