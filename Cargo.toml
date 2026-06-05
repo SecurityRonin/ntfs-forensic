@@ -6,15 +6,20 @@ rust-version = "1.85"
 license = "MIT"
 description = "Forensic-grade, from-scratch NTFS filesystem reader — MFT, attributes, indexes, data runs, and deleted/slack/anti-forensic recovery over any Read + Seek source"
 repository = "https://github.com/SecurityRonin/ntfs-forensic"
+homepage = "https://github.com/SecurityRonin/ntfs-forensic"
+documentation = "https://docs.rs/ntfs-forensic"
+readme = "README.md"
+authors = ["Albert Hui <albert@securityronin.com>"]
 keywords = ["forensics", "ntfs", "filesystem", "dfir", "mft"]
 categories = ["parser-implementations", "filesystem"]
+exclude = ["/fuzz", "/.github", "/docs"]
 
 [dependencies]
 thiserror = "2"
 # NTFS on-disk structure knowledge (magic, offsets, type codes) lives in the
 # KNOWLEDGE layer. Once forensicnomicon is feature-gated this becomes
 # `{ default-features = false, features = ["filesystems"] }` for a lean slice.
-forensicnomicon = { path = "../forensicnomicon" }
+forensicnomicon = { path = "../forensicnomicon", version = "0.1" }
 
 [dev-dependencies]
 # Independent oracles for doer-checker validation against real images are added
