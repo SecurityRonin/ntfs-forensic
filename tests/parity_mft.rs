@@ -52,9 +52,11 @@ fn parity_with_mft_crate() {
         // First occurrence wins: iteration is in physical order, so position N
         // (record number N on a contiguous MFT) is seen before any stray later
         // record that reuses the same number.
-        oracle
-            .entry(entry.header.record_number)
-            .or_insert((entry.is_allocated(), entry.is_dir(), name));
+        oracle.entry(entry.header.record_number).or_insert((
+            entry.is_allocated(),
+            entry.is_dir(),
+            name,
+        ));
     }
 
     // Subject: ntfs-forensic over the same 1024-byte records, aligned by position.
@@ -100,7 +102,9 @@ fn parity_with_mft_crate() {
             if ntfs_names.iter().any(|n| n == on) {
                 name_match += 1;
             } else if samples.len() < 25 {
-                samples.push(format!("rec {i} name: mft={on:?} not in ntfs {ntfs_names:?}"));
+                samples.push(format!(
+                    "rec {i} name: mft={on:?} not in ntfs {ntfs_names:?}"
+                ));
             }
         }
     }
@@ -123,7 +127,10 @@ fn parity_with_mft_crate() {
 
     assert!(compared > 1000, "too few records compared: {compared}");
     assert_eq!(flag_mismatch, 0, "in-use/is-dir must match the mft crate");
-    assert_eq!(recnum_mismatch, 0, "record numbers must match the mft crate");
+    assert_eq!(
+        recnum_mismatch, 0,
+        "record numbers must match the mft crate"
+    );
     assert_eq!(
         name_match, name_total,
         "every name the oracle reports must be parsed by ntfs-forensic"
