@@ -104,34 +104,52 @@ pub fn read_attribute_value<R: Read + Seek>(
                 offset: attribute.offset,
                 detail: "resident content out of bounds",
             }),
-        AttributeBody::NonResident {
-            runs_offset,
-            real_size,
-            ..
-        } => {
-            let attr_end = attribute
-                .offset
-                .checked_add(attribute.length as usize)
-                .ok_or(NtfsError::BadAttribute {
-                    offset: attribute.offset,
-                    detail: "attribute length overflow",
-                })?;
-            let runs_start = attribute.offset.checked_add(runs_offset as usize).ok_or(
-                NtfsError::BadAttribute {
-                    offset: attribute.offset,
-                    detail: "runs offset overflow",
-                },
-            )?;
-            let runs_bytes = record
-                .get(runs_start..attr_end)
-                .ok_or(NtfsError::BadAttribute {
-                    offset: attribute.offset,
-                    detail: "runlist out of bounds",
-                })?;
-            let runs = runlist::decode(runs_bytes)?;
+        AttributeBody::NonResident { real_size, .. } => {
+            let runs = attribute_runlist(record, attribute)?;
             read_runs(reader, &runs, cluster_size, real_size)
         }
     }
+}
+
+/// Decode the data-run list of a non-resident attribute from its (fixed-up)
+/// record bytes.
+///
+/// Reused to assemble a split `$DATA` whose runlist spans several `$DATA`
+/// attributes in different MFT records (via `$ATTRIBUTE_LIST`).
+///
+/// # Errors
+///
+/// [`NtfsError::BadAttribute`] for a resident attribute or an out-of-bounds
+/// runlist; [`NtfsError::BadRunlist`] for a malformed runlist.
+pub fn attribute_runlist(record: &[u8], attribute: &Attribute) -> Result<Vec<Run>> {
+    let AttributeBody::NonResident { runs_offset, .. } = attribute.body else {
+        return Err(NtfsError::BadAttribute {
+            offset: attribute.offset,
+            detail: "attribute is resident (no runlist)",
+        });
+    };
+    let attr_end = attribute
+        .offset
+        .checked_add(attribute.length as usize)
+        .ok_or(NtfsError::BadAttribute {
+            offset: attribute.offset,
+            detail: "attribute length overflow",
+        })?;
+    let runs_start =
+        attribute
+            .offset
+            .checked_add(runs_offset as usize)
+            .ok_or(NtfsError::BadAttribute {
+                offset: attribute.offset,
+                detail: "runs offset overflow",
+            })?;
+    let runs_bytes = record
+        .get(runs_start..attr_end)
+        .ok_or(NtfsError::BadAttribute {
+            offset: attribute.offset,
+            detail: "runlist out of bounds",
+        })?;
+    runlist::decode(runs_bytes)
 }
 
 #[cfg(test)]
@@ -370,6 +388,27 @@ mod tests {
         assert!(matches!(
             read_attribute_value(&mut vol, &record, &attr, 512),
             Err(NtfsError::BadAttribute { detail, .. }) if detail == "runs offset overflow"
+        ));
+    }
+
+    #[test]
+    fn attribute_runlist_rejects_resident_attribute() {
+        let attr = Attribute {
+            type_code: forensicnomicon::ntfs::attr_types::DATA,
+            length: 0x20,
+            non_resident: false,
+            name: None,
+            flags: 0,
+            attribute_id: 0,
+            offset: 0,
+            body: AttributeBody::Resident {
+                content_offset: 0x18,
+                content_length: 4,
+            },
+        };
+        assert!(matches!(
+            attribute_runlist(&[0u8; 0x20], &attr),
+            Err(NtfsError::BadAttribute { detail, .. }) if detail.contains("resident")
         ));
     }
 }

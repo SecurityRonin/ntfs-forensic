@@ -185,19 +185,48 @@ impl<R: Read + Seek> NtfsFs<R> {
         // it lives.
         let records = self.gather_records(rec_num, &record)?;
         let cluster_size = self.boot.cluster_size();
-        for rec_bytes in &records {
-            let attrs = record_attributes(rec_bytes)?;
-            if let Some(data) = attrs
-                .iter()
-                .find(|a| a.type_code == attr_types::DATA && a.name.as_deref() == stream)
-            {
-                return read_attribute_value(&mut self.reader, rec_bytes, data, cluster_size);
+
+        // Collect every matching $DATA attribute, paired with its source record.
+        // A resident stream is a single attribute; a non-resident stream may be
+        // split into several fragments (different start VCNs) across records.
+        let mut resident: Option<(usize, Attribute)> = None;
+        // (start_vcn, real_size, record index, attribute) per non-resident fragment.
+        let mut fragments: Vec<(u64, u64, usize, Attribute)> = Vec::new();
+        for (idx, rec_bytes) in records.iter().enumerate() {
+            for attr in record_attributes(rec_bytes)? {
+                if attr.type_code != attr_types::DATA || attr.name.as_deref() != stream {
+                    continue;
+                }
+                match &attr.body {
+                    AttributeBody::Resident { .. } => resident = Some((idx, attr)),
+                    AttributeBody::NonResident {
+                        start_vcn,
+                        real_size,
+                        ..
+                    } => fragments.push((*start_vcn, *real_size, idx, attr)),
+                }
             }
         }
-        Err(match stream {
-            Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
-            None => NtfsError::NotFound(format!("{path}::$DATA")),
-        })
+
+        if let Some((idx, attr)) = resident {
+            return read_attribute_value(&mut self.reader, &records[idx], &attr, cluster_size);
+        }
+        if fragments.is_empty() {
+            return Err(match stream {
+                Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
+                None => NtfsError::NotFound(format!("{path}::$DATA")),
+            });
+        }
+
+        // Concatenate the fragments' runlists in VCN order; the total size is
+        // carried by the first fragment (start VCN 0).
+        fragments.sort_by_key(|(start_vcn, _, _, _)| *start_vcn);
+        let real_size = fragments[0].1;
+        let mut runs = Vec::new();
+        for (_, _, idx, attr) in &fragments {
+            runs.extend(crate::data::attribute_runlist(&records[*idx], attr)?);
+        }
+        crate::data::read_runs(&mut self.reader, &runs, cluster_size, real_size)
     }
 
     /// The base record plus every distinct extension record referenced by its
@@ -556,9 +585,21 @@ mod tests {
         ]
         .concat();
         let mut a7 = Vec::new();
-        a7.extend_from_slice(&attr_resident(attr_types::STANDARD_INFORMATION, None, &[0u8; 0x30]));
-        a7.extend_from_slice(&attr_resident(attr_types::FILE_NAME, None, &fname_content(5, "split.bin")));
-        a7.extend_from_slice(&attr_resident(attr_types::ATTRIBUTE_LIST, None, &attrlist_split));
+        a7.extend_from_slice(&attr_resident(
+            attr_types::STANDARD_INFORMATION,
+            None,
+            &[0u8; 0x30],
+        ));
+        a7.extend_from_slice(&attr_resident(
+            attr_types::FILE_NAME,
+            None,
+            &fname_content(5, "split.bin"),
+        ));
+        a7.extend_from_slice(&attr_resident(
+            attr_types::ATTRIBUTE_LIST,
+            None,
+            &attrlist_split,
+        ));
         a7.extend_from_slice(&nonresident_data_vcn(
             &[0x11, 0x01, data_lcn0, 0x00],
             2 * CLUSTER as u64,
