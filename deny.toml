@@ -5,6 +5,10 @@ all-features = false
 [advisories]
 version = 2
 yanked = "deny"
+# RUSTSEC-2021-0153: `encoding` is unmaintained. It enters the graph ONLY via the
+# `mft` dev-dependency (the cross-validation oracle in tests/parity_mft.rs) and is
+# never part of the published crate. Dev-only, not shipped.
+ignore = ["RUSTSEC-2021-0153"]
 
 [licenses]
 version = 2
