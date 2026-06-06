@@ -19,31 +19,21 @@ use ntfs_forensic::{apply_fixup, parse_attributes, FileName, MftRecordHeader};
 
 const FILE_NAME: u32 = 0x30;
 
-/// ntfs-forensic's "best" file name for a record: prefer Win32 / Win32+DOS over
-/// DOS over POSIX — matching the mft crate's `find_best_name_attribute`.
-fn best_name(record: &[u8], first_attr_off: usize) -> Option<String> {
-    let attrs = parse_attributes(record, first_attr_off).ok()?;
-    let mut best: Option<(u8, String)> = None;
-    for a in attrs {
-        if a.type_code != FILE_NAME {
-            continue;
-        }
-        let Some(content) = a.resident_content(record) else {
-            continue;
-        };
-        let Ok(fnm) = FileName::parse(content) else {
-            continue;
-        };
-        let priority = match fnm.namespace {
-            1 | 3 => 3, // Win32 / Win32+DOS
-            2 => 1,     // DOS
-            _ => 2,     // POSIX
-        };
-        if best.as_ref().is_none_or(|(p, _)| priority > *p) {
-            best = Some((priority, fnm.name));
-        }
-    }
-    best.map(|(_, n)| n)
+/// Every `$FILE_NAME` ntfs-forensic parses for a record. A file may carry
+/// several (hard links / 8.3-DOS / Win32 / POSIX), so the parity check validates
+/// that the oracle's chosen name is *among* these — i.e. that ntfs-forensic
+/// parsed it — rather than that both tools picked the same "best" one.
+fn names(record: &[u8], first_attr_off: usize) -> Vec<String> {
+    let Ok(attrs) = parse_attributes(record, first_attr_off) else {
+        return Vec::new();
+    };
+    attrs
+        .iter()
+        .filter(|a| a.type_code == FILE_NAME)
+        .filter_map(|a| a.resident_content(record))
+        .filter_map(|content| FileName::parse(content).ok())
+        .map(|fnm| fnm.name)
+        .collect()
 }
 
 #[test]
@@ -106,14 +96,11 @@ fn parity_with_mft_crate() {
         }
         if let Some(on) = o_name {
             name_total += 1;
-            if best_name(&buf, header.first_attribute_offset as usize).as_deref() == Some(on) {
+            let ntfs_names = names(&buf, header.first_attribute_offset as usize);
+            if ntfs_names.iter().any(|n| n == on) {
                 name_match += 1;
             } else if samples.len() < 25 {
-                samples.push(format!(
-                    "rec {i} name: ntfs={:?} vs mft={:?}",
-                    best_name(&buf, header.first_attribute_offset as usize),
-                    on
-                ));
+                samples.push(format!("rec {i} name: mft={on:?} not in ntfs {ntfs_names:?}"));
             }
         }
     }
@@ -137,8 +124,8 @@ fn parity_with_mft_crate() {
     assert!(compared > 1000, "too few records compared: {compared}");
     assert_eq!(flag_mismatch, 0, "in-use/is-dir must match the mft crate");
     assert_eq!(recnum_mismatch, 0, "record numbers must match the mft crate");
-    assert!(
-        name_match * 100 >= name_total * 99,
-        "file-name agreement below 99%"
+    assert_eq!(
+        name_match, name_total,
+        "every name the oracle reports must be parsed by ntfs-forensic"
     );
 }
