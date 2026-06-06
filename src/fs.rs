@@ -395,6 +395,12 @@ mod tests {
     }
 
     fn nonresident_data(runs: &[u8], real_size: u64) -> Vec<u8> {
+        nonresident_data_vcn(runs, real_size, 0)
+    }
+
+    /// A non-resident `$DATA` whose mapping begins at `start_vcn` — a fragment of
+    /// a runlist split across several `$DATA` attributes.
+    fn nonresident_data_vcn(runs: &[u8], real_size: u64, start_vcn: u64) -> Vec<u8> {
         let runs_off = 0x40usize;
         let len = (runs_off + runs.len() + 7) & !7;
         let mut a = vec![0u8; len];
@@ -402,6 +408,7 @@ mod tests {
         a[4..8].copy_from_slice(&(len as u32).to_le_bytes());
         a[0x08] = 1;
         a[0x0A..0x0C].copy_from_slice(&(runs_off as u16).to_le_bytes());
+        a[0x10..0x18].copy_from_slice(&start_vcn.to_le_bytes());
         a[0x20..0x22].copy_from_slice(&(runs_off as u16).to_le_bytes());
         a[0x28..0x30].copy_from_slice(&real_size.to_le_bytes());
         a[0x30..0x38].copy_from_slice(&real_size.to_le_bytes());
@@ -481,9 +488,10 @@ mod tests {
             &nonresident_data(&runs, mft_clusters * CLUSTER as u64),
         );
 
-        // record 5: root directory with "test.txt" → 6 and "frag.txt" → 9.
+        // record 5: root directory — test.txt → 6, frag.txt → 9, split.bin → 7.
         let root_index = index_root(&[
             index_entry(6, "test.txt"),
+            index_entry(7, "split.bin"),
             index_entry(9, "frag.txt"),
             index_end(),
         ]);
@@ -535,6 +543,33 @@ mod tests {
         // record 10: the extension record holding frag.txt's $DATA.
         let rec10 = build_record(0x0001, &resident_data(b"fragmented!"));
 
+        // split.bin: a non-resident $DATA whose runlist is split into two
+        // fragments — VCN 0 in base record 7 (LCN 26), VCN 1 in extension
+        // record 8 (LCN 27). Total real size 1024 (two clusters).
+        let data_lcn0 = (MFT_LCN + mft_clusters) as u8; // 26
+        let data_lcn1 = data_lcn0 + 1; // 27
+        let attrlist_split = [
+            attrlist_entry(attr_types::STANDARD_INFORMATION, 7, 0),
+            attrlist_entry(attr_types::FILE_NAME, 7, 0),
+            attrlist_entry(attr_types::DATA, 7, 0),
+            attrlist_entry(attr_types::DATA, 8, 1),
+        ]
+        .concat();
+        let mut a7 = Vec::new();
+        a7.extend_from_slice(&attr_resident(attr_types::STANDARD_INFORMATION, None, &[0u8; 0x30]));
+        a7.extend_from_slice(&attr_resident(attr_types::FILE_NAME, None, &fname_content(5, "split.bin")));
+        a7.extend_from_slice(&attr_resident(attr_types::ATTRIBUTE_LIST, None, &attrlist_split));
+        a7.extend_from_slice(&nonresident_data_vcn(
+            &[0x11, 0x01, data_lcn0, 0x00],
+            2 * CLUSTER as u64,
+            0,
+        ));
+        let rec7 = build_record(0x0001, &a7);
+        let rec8 = build_record(
+            0x0001,
+            &nonresident_data_vcn(&[0x11, 0x01, data_lcn1, 0x00], 0, 1),
+        );
+
         let mft_off = MFT_LCN as usize * CLUSTER;
         let place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
             let o = mft_off + idx * REC;
@@ -543,8 +578,16 @@ mod tests {
         place(&mut vol, 0, &rec0);
         place(&mut vol, 5, &rec5);
         place(&mut vol, 6, &rec6);
+        place(&mut vol, 7, &rec7);
+        place(&mut vol, 8, &rec8);
         place(&mut vol, 9, &rec9);
         place(&mut vol, 10, &rec10);
+
+        // split.bin's two data clusters.
+        let c0 = data_lcn0 as usize * CLUSTER;
+        let c1 = data_lcn1 as usize * CLUSTER;
+        vol[c0..c0 + CLUSTER].fill(b'A');
+        vol[c1..c1 + CLUSTER].fill(b'B');
 
         Cursor::new(vol)
     }
@@ -627,6 +670,17 @@ mod tests {
         // record 10, reachable only via $ATTRIBUTE_LIST.
         let mut fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.read_file("\\frag.txt").unwrap(), b"fragmented!");
+    }
+
+    #[test]
+    fn read_file_assembles_split_nonresident_data() {
+        // split.bin's runlist is split across two $DATA attributes (VCN 0 and 1)
+        // in different records — they must be concatenated in VCN order.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let data = fs.read_file("\\split.bin").unwrap();
+        assert_eq!(data.len(), 1024);
+        assert!(data[..512].iter().all(|&b| b == b'A'));
+        assert!(data[512..].iter().all(|&b| b == b'B'));
     }
 
     #[test]
