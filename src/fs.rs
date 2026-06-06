@@ -416,9 +416,23 @@ mod tests {
         attr_resident(attr_types::INDEX_ROOT, Some("$I30"), &content)
     }
 
-    /// Build a volume: boot + a 7-record MFT (record 0 = $MFT, 5 = root, 6 = file).
+    /// One `$ATTRIBUTE_LIST` entry: attribute `type_code` (id `attr_id`) lives in
+    /// MFT `record`.
+    fn attrlist_entry(type_code: u32, record: u64, attr_id: u16) -> Vec<u8> {
+        let len = 0x20usize; // ENTRY_MIN (0x1A) padded to 8
+        let mut e = vec![0u8; len];
+        e[0x00..0x04].copy_from_slice(&type_code.to_le_bytes());
+        e[0x04..0x06].copy_from_slice(&(len as u16).to_le_bytes());
+        e[0x07] = 0x1A; // name_offset (no name)
+        e[0x10..0x18].copy_from_slice(&((1u64 << 48) | record).to_le_bytes()); // base ref
+        e[0x18..0x1A].copy_from_slice(&attr_id.to_le_bytes());
+        e
+    }
+
+    /// Build a volume: boot + an MFT with $MFT, root, an inline file, and a
+    /// fragmented file whose `$DATA` lives in an extension record.
     fn build_volume() -> Cursor<Vec<u8>> {
-        let num_records = 7usize;
+        let num_records = 11usize;
         let mft_clusters = (num_records * REC / CLUSTER) as u64; // 14
         let total_clusters = MFT_LCN + mft_clusters + 2;
         let mut vol = vec![0u8; total_clusters as usize * CLUSTER];
@@ -431,8 +445,12 @@ mod tests {
             &nonresident_data(&runs, mft_clusters * CLUSTER as u64),
         );
 
-        // record 5: root directory with one child "test.txt" → record 6.
-        let root_index = index_root(&[index_entry(6, "test.txt"), index_end()]);
+        // record 5: root directory with "test.txt" → 6 and "frag.txt" → 9.
+        let root_index = index_root(&[
+            index_entry(6, "test.txt"),
+            index_entry(9, "frag.txt"),
+            index_end(),
+        ]);
         let rec5 = build_record(0x0003, &root_index); // IN_USE | DIRECTORY
 
         // record 6: the file, resident $DATA "hello world".
@@ -456,6 +474,23 @@ mod tests {
         ));
         let rec6 = build_record(0x0001, &file_attrs);
 
+        // record 9: "frag.txt" base — $SI, $FN, and an $ATTRIBUTE_LIST whose
+        // $DATA entry points at extension record 10.
+        let attrlist = [
+            attrlist_entry(attr_types::STANDARD_INFORMATION, 9, 0),
+            attrlist_entry(attr_types::FILE_NAME, 9, 0),
+            attrlist_entry(attr_types::DATA, 10, 0),
+        ]
+        .concat();
+        let mut a9 = Vec::new();
+        a9.extend_from_slice(&attr_resident(attr_types::STANDARD_INFORMATION, None, &[0u8; 0x30]));
+        a9.extend_from_slice(&attr_resident(attr_types::FILE_NAME, None, &fname_content(5, "frag.txt")));
+        a9.extend_from_slice(&attr_resident(attr_types::ATTRIBUTE_LIST, None, &attrlist));
+        let rec9 = build_record(0x0001, &a9);
+
+        // record 10: the extension record holding frag.txt's $DATA.
+        let rec10 = build_record(0x0001, &resident_data(b"fragmented!"));
+
         let mft_off = MFT_LCN as usize * CLUSTER;
         let place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
             let o = mft_off + idx * REC;
@@ -464,6 +499,8 @@ mod tests {
         place(&mut vol, 0, &rec0);
         place(&mut vol, 5, &rec5);
         place(&mut vol, 6, &rec6);
+        place(&mut vol, 9, &rec9);
+        place(&mut vol, 10, &rec10);
 
         Cursor::new(vol)
     }
@@ -538,6 +575,14 @@ mod tests {
         // The root directory has no unnamed $DATA.
         let mut fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(fs.read_file("\\"), Err(NtfsError::NotFound(_))));
+    }
+
+    #[test]
+    fn read_file_follows_attribute_list_to_extension_record() {
+        // frag.txt's $DATA is not in its base record — it lives in extension
+        // record 10, reachable only via $ATTRIBUTE_LIST.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert_eq!(fs.read_file("\\frag.txt").unwrap(), b"fragmented!");
     }
 
     #[test]
