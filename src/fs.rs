@@ -156,7 +156,7 @@ impl<R: Read + Seek> NtfsFs<R> {
         Ok(current)
     }
 
-    /// Read a file's unnamed `$DATA` by path.
+    /// Read a file's unnamed (default) `$DATA` by path.
     ///
     /// # Errors
     ///
@@ -170,6 +170,17 @@ impl<R: Read + Seek> NtfsFs<R> {
             .find(|a| a.type_code == attr_types::DATA && a.name.is_none())
             .ok_or_else(|| NtfsError::NotFound(format!("{path}::$DATA")))?;
         read_attribute_value(&mut self.reader, &record, data, self.boot.cluster_size())
+    }
+
+    /// Read a named `$DATA` stream — an alternate data stream (ADS) — by path
+    /// and stream name (e.g. `$UsnJrnl`'s `$J`, or a file's `Zone.Identifier`).
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the path or the named stream is missing.
+    pub fn read_named_stream(&mut self, path: &str, stream: &str) -> Result<Vec<u8>> {
+        let _ = (path, stream);
+        todo!("read_named_stream — GREEN step")
     }
 }
 
@@ -429,6 +440,12 @@ mod tests {
             &fname_content(5, "test.txt"),
         ));
         file_attrs.extend_from_slice(&resident_data(b"hello world"));
+        // A named $DATA stream (alternate data stream).
+        file_attrs.extend_from_slice(&attr_resident(
+            attr_types::DATA,
+            Some("Zone.Identifier"),
+            b"[ZoneTransfer]",
+        ));
         let rec6 = build_record(0x0001, &file_attrs);
 
         let mft_off = MFT_LCN as usize * CLUSTER;
@@ -485,6 +502,26 @@ mod tests {
     fn read_file_returns_contents() {
         let mut fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+        // read_file reads only the unnamed stream, not the ADS.
+        assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+    }
+
+    #[test]
+    fn read_named_stream_returns_ads_contents() {
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert_eq!(
+            fs.read_named_stream("\\test.txt", "Zone.Identifier").unwrap(),
+            b"[ZoneTransfer]"
+        );
+    }
+
+    #[test]
+    fn read_named_stream_missing_is_not_found() {
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert!(matches!(
+            fs.read_named_stream("\\test.txt", "NoSuchStream"),
+            Err(NtfsError::NotFound(_))
+        ));
     }
 
     #[test]
