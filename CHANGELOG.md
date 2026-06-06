@@ -1,0 +1,58 @@
+# Changelog
+
+All notable changes to `ntfs-forensic` are documented in this file.
+
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
+and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+
+## [Unreleased]
+
+## [0.1.0] — 2026-06-06
+
+Initial crates.io release.
+
+### Added
+
+- From-scratch NTFS reader over any `Read + Seek` source — no third-party NTFS
+  parsing dependency.
+- Boot sector / BPB parsing (`BootSector::parse`).
+- FILE record parsing with update-sequence-array fixup
+  (`MftRecordHeader::parse`, `apply_fixup`).
+- Resident and non-resident attribute walking (`parse_attributes`,
+  `Attribute`, `AttributeBody`).
+- `$STANDARD_INFORMATION` and `$FILE_NAME` timestamp decoding.
+- Data-run (runlist) decoding with sparse and non-resident reads
+  (`decode_runlist`, `read_attribute_value`).
+- LZNT1 decompression (`decompress`).
+- `$ATTRIBUTE_LIST` following for heavily fragmented files
+  (`parse_attribute_list`).
+- Directory B-tree traversal (`$INDEX_ROOT` / INDX) (`IndexRoot::parse`,
+  `parse_index_buffer`).
+- Named alternate-data-stream reads via `read_named_stream`.
+- Path and record navigation (`NtfsFs::open`, `read_file`, `read_record`,
+  `directory_entries`, `resolve_path`).
+- Bounded partition window (`OffsetReader`) — structurally cannot read past the
+  partition boundary.
+- Forensic Tier-2: `$SI`-vs-`$FN` timestomp detection (`detect_timestomp`),
+  alternate-data-stream enumeration (`alternate_data_streams`),
+  deleted-record carving (`carve_file_records`, `is_deleted`), and MFT record
+  slack extraction (`record_slack`).
+
+### Security
+
+- `#![forbid(unsafe_code)]` across the whole crate.
+- Adversarial-input hardening: bounded allocations, loop caps, and fixup
+  verification surface malformed input as typed errors rather than panics or
+  silently-wrong output.
+- Seven `cargo-fuzz` targets (`attribute_list`, `attributes`, `boot`,
+  `compress`, `index_buffer`, `record`, `runlist`).
+
+### Testing
+
+- 100% line coverage, enforced in CI.
+- Boot parser cross-validated against The Sleuth Kit's `fsstat` on a real disk
+  image; MFT parsing cross-validated against the `mft` crate as an independent
+  oracle.
+
+[Unreleased]: https://github.com/SecurityRonin/ntfs-forensic/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/SecurityRonin/ntfs-forensic/releases/tag/v0.1.0

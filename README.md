@@ -8,6 +8,8 @@
 
 Forensic-grade NTFS reader for Rust. A clean, from-scratch implementation that reads files and directories from any `Read + Seek` source — and goes beyond a normal filesystem driver to surface the artifacts an examiner needs: timestomping indicators, alternate data streams, deleted MFT records, and record slack that a "clean" reader is designed to hide.
 
+It is the NTFS FS-layer foundation for the SecurityRonin forensic family: [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) and [`issen`](https://github.com/SecurityRonin/issen) consume it as their single, auditable NTFS engine.
+
 ## Rust library
 
 ```toml
