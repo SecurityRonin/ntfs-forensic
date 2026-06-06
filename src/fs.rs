@@ -162,14 +162,7 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        let rec_num = self.resolve_path(path)?;
-        let record = self.read_record(rec_num)?;
-        let attrs = record_attributes(&record)?;
-        let data = attrs
-            .iter()
-            .find(|a| a.type_code == attr_types::DATA && a.name.is_none())
-            .ok_or_else(|| NtfsError::NotFound(format!("{path}::$DATA")))?;
-        read_attribute_value(&mut self.reader, &record, data, self.boot.cluster_size())
+        self.read_data_stream(path, None)
     }
 
     /// Read a named `$DATA` stream — an alternate data stream (ADS) — by path
@@ -179,8 +172,23 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] if the path or the named stream is missing.
     pub fn read_named_stream(&mut self, path: &str, stream: &str) -> Result<Vec<u8>> {
-        let _ = (path, stream);
-        todo!("read_named_stream — GREEN step")
+        self.read_data_stream(path, Some(stream))
+    }
+
+    /// Read the `$DATA` attribute named `stream` (or the unnamed/default stream
+    /// when `None`) of the file at `path`.
+    fn read_data_stream(&mut self, path: &str, stream: Option<&str>) -> Result<Vec<u8>> {
+        let rec_num = self.resolve_path(path)?;
+        let record = self.read_record(rec_num)?;
+        let attrs = record_attributes(&record)?;
+        let data = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::DATA && a.name.as_deref() == stream)
+            .ok_or_else(|| match stream {
+                Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
+                None => NtfsError::NotFound(format!("{path}::$DATA")),
+            })?;
+        read_attribute_value(&mut self.reader, &record, data, self.boot.cluster_size())
     }
 }
 
@@ -510,7 +518,8 @@ mod tests {
     fn read_named_stream_returns_ads_contents() {
         let mut fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(
-            fs.read_named_stream("\\test.txt", "Zone.Identifier").unwrap(),
+            fs.read_named_stream("\\test.txt", "Zone.Identifier")
+                .unwrap(),
             b"[ZoneTransfer]"
         );
     }
@@ -522,6 +531,13 @@ mod tests {
             fs.read_named_stream("\\test.txt", "NoSuchStream"),
             Err(NtfsError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn read_file_on_directory_has_no_data_stream() {
+        // The root directory has no unnamed $DATA.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert!(matches!(fs.read_file("\\"), Err(NtfsError::NotFound(_))));
     }
 
     #[test]
