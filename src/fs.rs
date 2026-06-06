@@ -180,15 +180,51 @@ impl<R: Read + Seek> NtfsFs<R> {
     fn read_data_stream(&mut self, path: &str, stream: Option<&str>) -> Result<Vec<u8>> {
         let rec_num = self.resolve_path(path)?;
         let record = self.read_record(rec_num)?;
-        let attrs = record_attributes(&record)?;
-        let data = attrs
+        // Gather the base record and any extension records the file's attributes
+        // are spread across (via $ATTRIBUTE_LIST), then find the $DATA wherever
+        // it lives.
+        let records = self.gather_records(rec_num, &record)?;
+        let cluster_size = self.boot.cluster_size();
+        for rec_bytes in &records {
+            let attrs = record_attributes(rec_bytes)?;
+            if let Some(data) = attrs
+                .iter()
+                .find(|a| a.type_code == attr_types::DATA && a.name.as_deref() == stream)
+            {
+                return read_attribute_value(&mut self.reader, rec_bytes, data, cluster_size);
+            }
+        }
+        Err(match stream {
+            Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
+            None => NtfsError::NotFound(format!("{path}::$DATA")),
+        })
+    }
+
+    /// The base record plus every distinct extension record referenced by its
+    /// `$ATTRIBUTE_LIST` (if any) — so a fragmented file's attributes can be
+    /// found wherever the MFT spread them. Cycles are broken by tracking seen
+    /// record numbers.
+    fn gather_records(&mut self, base_num: u64, base_record: &[u8]) -> Result<Vec<Vec<u8>>> {
+        let base_attrs = record_attributes(base_record)?;
+        let mut records = vec![base_record.to_vec()];
+
+        if let Some(al) = base_attrs
             .iter()
-            .find(|a| a.type_code == attr_types::DATA && a.name.as_deref() == stream)
-            .ok_or_else(|| match stream {
-                Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
-                None => NtfsError::NotFound(format!("{path}::$DATA")),
-            })?;
-        read_attribute_value(&mut self.reader, &record, data, self.boot.cluster_size())
+            .find(|a| a.type_code == attr_types::ATTRIBUTE_LIST)
+        {
+            let content =
+                read_attribute_value(&mut self.reader, base_record, al, self.boot.cluster_size())?;
+            let entries = crate::attribute_list::parse(&content)?;
+            let mut seen = std::collections::BTreeSet::new();
+            seen.insert(base_num);
+            for entry in entries {
+                let rn = entry.base_reference.record_number;
+                if seen.insert(rn) {
+                    records.push(self.read_record(rn)?);
+                }
+            }
+        }
+        Ok(records)
     }
 }
 
@@ -483,8 +519,16 @@ mod tests {
         ]
         .concat();
         let mut a9 = Vec::new();
-        a9.extend_from_slice(&attr_resident(attr_types::STANDARD_INFORMATION, None, &[0u8; 0x30]));
-        a9.extend_from_slice(&attr_resident(attr_types::FILE_NAME, None, &fname_content(5, "frag.txt")));
+        a9.extend_from_slice(&attr_resident(
+            attr_types::STANDARD_INFORMATION,
+            None,
+            &[0u8; 0x30],
+        ));
+        a9.extend_from_slice(&attr_resident(
+            attr_types::FILE_NAME,
+            None,
+            &fname_content(5, "frag.txt"),
+        ));
         a9.extend_from_slice(&attr_resident(attr_types::ATTRIBUTE_LIST, None, &attrlist));
         let rec9 = build_record(0x0001, &a9);
 
@@ -718,9 +762,9 @@ mod tests {
 
     #[test]
     fn read_record_rejects_number_past_mft() {
-        // Record 7 lies just past the 7-record synthetic MFT.
+        // Record 11 lies just past the 11-record synthetic MFT.
         let mut fs = NtfsFs::open(build_volume()).unwrap();
-        assert!(matches!(fs.read_record(7), Err(NtfsError::BadRunlist(_))));
+        assert!(matches!(fs.read_record(11), Err(NtfsError::BadRunlist(_))));
     }
 
     #[test]
