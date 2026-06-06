@@ -21,8 +21,9 @@ thiserror = "2"
 forensicnomicon = "0.2"
 
 [dev-dependencies]
-# Independent oracles for doer-checker validation against real images are added
-# in later increments: omerbenamram/mft and ColinFinck/ntfs (both MIT/Apache-2.0).
+# Independent oracle for doer-checker validation against real $MFT images
+# (parity gate in tests/parity_mft.rs). MIT/Apache-2.0 — dev-only, no GPL.
+mft = "0.6"
 
 [lints.rust]
 unsafe_code = "forbid"
