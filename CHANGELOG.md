@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-06-07
+
+### Added
+
+- `NtfsFs::read_named_stream(path, stream)` — read a named alternate data stream
+  (e.g. `$UsnJrnl:$J`, a file's `Zone.Identifier`), sharing the resident /
+  non-resident read path with `read_file`.
+- `$ATTRIBUTE_LIST` following: attributes spread across extension MFT records are
+  gathered (cycle-broken) so `read_file` works on heavily fragmented files whose
+  `$DATA` lives in extension records.
+- Assembly of a split non-resident `$DATA` whose runlist spans several `$DATA`
+  attributes (different `start_vcn`) across records, via `data::attribute_runlist`.
+
+### Validated
+
+- MFT record/attribute parsing cross-validated against the `mft` crate on a real
+  `$MFT` (DEF CON DFIR CTF), 65,528 records — in-use/is-dir/record-number 100%,
+  names 100% by membership (dev-only parity gate).
+
 ## [0.1.0] — 2026-06-06
 
 Initial crates.io release.
