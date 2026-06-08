@@ -337,6 +337,128 @@ pub fn audit_record(record: &[u8]) -> Vec<Anomaly> {
     )
 }
 
+// ── Volume-level metadata-artifact auditor ($MFTMirr, $LogFile) ───────────────
+//
+// The record auditor above grades per-MFT-record anomalies; these grade
+// volume-scoped artifacts whose parsers live in `ntfs_core` (`mftmirr`,
+// `logfile`). Each is an observation — the examiner draws the conclusions.
+
+/// Names of the four system records mirrored in `$MFTMirr`.
+const MIRROR_NAMES: [&str; 4] = ["$MFT", "$MFTMirr", "$LogFile", "$Volume"];
+
+/// Render mismatched mirror-entry indices as a human-readable system-file list.
+fn mismatched_names(entries: &[usize]) -> String {
+    entries
+        .iter()
+        .map(|&i| MIRROR_NAMES.get(i).copied().unwrap_or("?"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// A volume-level NTFS metadata-artifact anomaly — scoped to a metadata file
+/// rather than a single MFT record.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ArtifactAnomaly {
+    /// One or more of the first four system records in `$MFTMirr` differ from
+    /// the live `$MFT` — consistent with MFT tampering or corruption.
+    MftMirrorMismatch {
+        /// Indices (`0..4`) of the mirrored system records that differ.
+        mismatched_entries: Vec<usize>,
+    },
+    /// `$LogFile` shows page gaps or restart-area anomalies — consistent with
+    /// the NTFS transaction journal having been cleared.
+    LogFileCleared,
+}
+
+impl ArtifactAnomaly {
+    /// Severity — the single source of truth for this kind.
+    #[must_use]
+    pub fn severity(&self) -> Severity {
+        match self {
+            ArtifactAnomaly::MftMirrorMismatch { .. } => Severity::High,
+            ArtifactAnomaly::LogFileCleared => Severity::Medium,
+        }
+    }
+
+    /// Stable machine-readable code.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            ArtifactAnomaly::MftMirrorMismatch { .. } => "NTFS-MFTMIRR-MISMATCH",
+            ArtifactAnomaly::LogFileCleared => "NTFS-LOGFILE-CLEARED",
+        }
+    }
+
+    /// Human-readable, "consistent with" note.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match self {
+            ArtifactAnomaly::MftMirrorMismatch { mismatched_entries } => format!(
+                "$MFTMirr differs from $MFT for {} — consistent with MFT tampering or corruption",
+                mismatched_names(mismatched_entries)
+            ),
+            ArtifactAnomaly::LogFileCleared => "$LogFile shows gaps/restart-area anomalies — consistent with the transaction journal having been cleared".to_string(),
+        }
+    }
+}
+
+impl forensicnomicon::report::Observation for ArtifactAnomaly {
+    fn severity(&self) -> Option<Severity> {
+        Some(self.severity())
+    }
+    fn code(&self) -> &'static str {
+        self.code()
+    }
+    fn note(&self) -> String {
+        self.note()
+    }
+    fn evidence(&self) -> Vec<forensicnomicon::report::Evidence> {
+        use forensicnomicon::report::{Evidence, Location};
+        match self {
+            ArtifactAnomaly::MftMirrorMismatch { mismatched_entries } => vec![Evidence {
+                field: "mismatched system records".to_string(),
+                value: mismatched_names(mismatched_entries),
+                location: Some(Location::Field("$MFTMirr".to_string())),
+            }],
+            ArtifactAnomaly::LogFileCleared => vec![Evidence {
+                field: "$LogFile".to_string(),
+                value: "gaps/restart-area anomalies consistent with journal clearing".to_string(),
+                location: Some(Location::Field("$LogFile".to_string())),
+            }],
+        }
+    }
+}
+
+/// Audit the `$MFTMirr` against the live `$MFT`, flagging any of the first four
+/// system records that differ. Malformed input yields no findings.
+#[must_use]
+pub fn audit_mft_mirror(mft_data: &[u8], mftmirr_data: &[u8]) -> Vec<ArtifactAnomaly> {
+    match ntfs_core::mftmirr::compare_mft_mirror(mft_data, mftmirr_data) {
+        Ok(cmp) if !cmp.is_consistent => {
+            let mismatched_entries = cmp
+                .matches
+                .iter()
+                .enumerate()
+                .filter_map(|(i, &m)| (!m).then_some(i))
+                .collect();
+            vec![ArtifactAnomaly::MftMirrorMismatch { mismatched_entries }]
+        }
+        _ => Vec::new(),
+    }
+}
+
+/// Audit a raw `$LogFile` for journal-clearing indicators. Malformed input
+/// yields no findings.
+#[must_use]
+pub fn audit_logfile(logfile_data: &[u8]) -> Vec<ArtifactAnomaly> {
+    match ntfs_core::logfile::parse_logfile(logfile_data) {
+        Ok(summary) if ntfs_core::logfile::detect_journal_clearing(&summary) => {
+            vec![ArtifactAnomaly::LogFileCleared]
+        }
+        _ => Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,5 +794,100 @@ mod tests {
         });
         assert!(f.code.starts_with("NTFS-"));
         assert!(f.severity.is_some());
+    }
+
+    // ── Volume-level artifact auditor ─────────────────────────────────────
+
+    fn rstr_page() -> Vec<u8> {
+        let mut p = vec![0u8; 0x1000];
+        p[0..4].copy_from_slice(b"RSTR");
+        p[0x10..0x12].copy_from_slice(&1u16.to_le_bytes());
+        p[0x20..0x24].copy_from_slice(&4096u32.to_le_bytes());
+        p[0x24..0x28].copy_from_slice(&4096u32.to_le_bytes());
+        p
+    }
+
+    fn rcrd_page(lsn: u64) -> Vec<u8> {
+        let mut p = vec![0u8; 0x1000];
+        p[0..4].copy_from_slice(b"RCRD");
+        p[0x18..0x20].copy_from_slice(&lsn.to_le_bytes());
+        p
+    }
+
+    #[test]
+    fn audit_mft_mirror_consistent_yields_no_findings() {
+        let mft = vec![0xAAu8; 1024 * 4];
+        assert!(audit_mft_mirror(&mft, &mft).is_empty());
+    }
+
+    #[test]
+    fn audit_mft_mirror_flags_each_differing_system_record() {
+        let mft = vec![0xAAu8; 1024 * 4];
+        let mut mirr = mft.clone();
+        mirr[0] = 0xBB; // record 0 ($MFT) differs
+        mirr[1024 * 2] = 0xCC; // record 2 ($LogFile) differs
+        let anomalies = audit_mft_mirror(&mft, &mirr);
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(
+            anomalies[0],
+            ArtifactAnomaly::MftMirrorMismatch {
+                mismatched_entries: vec![0, 2]
+            }
+        );
+        assert_eq!(anomalies[0].severity(), Severity::High);
+        assert_eq!(anomalies[0].code(), "NTFS-MFTMIRR-MISMATCH");
+        let note = anomalies[0].note();
+        assert!(note.contains("$MFT") && note.contains("$LogFile"));
+    }
+
+    #[test]
+    fn audit_logfile_flags_cleared_journal() {
+        // Empty $LogFile → no restart areas → treated as cleared.
+        let anomalies = audit_logfile(&[]);
+        assert_eq!(anomalies.len(), 1);
+        assert_eq!(anomalies[0], ArtifactAnomaly::LogFileCleared);
+        assert_eq!(anomalies[0].severity(), Severity::Medium);
+        assert_eq!(anomalies[0].code(), "NTFS-LOGFILE-CLEARED");
+        assert!(anomalies[0].note().contains("$LogFile"));
+    }
+
+    #[test]
+    fn audit_logfile_normal_journal_yields_no_findings() {
+        // Two restart areas + a record page, no gaps → not cleared.
+        let mut data = Vec::new();
+        data.extend_from_slice(&rstr_page());
+        data.extend_from_slice(&rstr_page());
+        data.extend_from_slice(&rcrd_page(3000));
+        assert!(audit_logfile(&data).is_empty());
+    }
+
+    #[test]
+    fn artifact_anomalies_convert_to_canonical_findings() {
+        use forensicnomicon::report::{Evidence, Observation, Source};
+        let src = || Source {
+            analyzer: "ntfs-forensic".to_string(),
+            scope: "volume".to_string(),
+            version: None,
+        };
+
+        let mirror = ArtifactAnomaly::MftMirrorMismatch {
+            mismatched_entries: vec![1],
+        };
+        let f = mirror.to_finding(src());
+        assert_eq!(f.code, "NTFS-MFTMIRR-MISMATCH");
+        assert_eq!(f.severity, Some(Severity::High));
+        let ev: &Evidence = &f.evidence[0];
+        assert_eq!(ev.value, "$MFTMirr");
+
+        let cleared = ArtifactAnomaly::LogFileCleared;
+        let f = cleared.to_finding(src());
+        assert_eq!(f.code, "NTFS-LOGFILE-CLEARED");
+        assert!(!f.evidence.is_empty());
+    }
+
+    #[test]
+    fn mismatched_names_handles_out_of_range_index() {
+        // The field is public, so guard the name lookup defensively.
+        assert_eq!(mismatched_names(&[99]), "?");
     }
 }
