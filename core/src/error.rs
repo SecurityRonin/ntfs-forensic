@@ -83,6 +83,11 @@ pub enum NtfsError {
     #[error("refusing to allocate {bytes} bytes")]
     TooLarge { bytes: u64 },
 
+    /// A `$UsnJrnl` change-journal record was malformed (bad length, truncated,
+    /// or an unsupported version) — rejected rather than trusted.
+    #[error("malformed USN record: {0}")]
+    Usn(String),
+
     /// An underlying I/O error.
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),

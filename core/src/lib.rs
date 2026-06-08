@@ -46,6 +46,7 @@ pub mod runlist;
 pub mod source;
 pub mod standard_information;
 pub mod time;
+pub mod usn;
 
 pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use attribute_list::{parse as parse_attribute_list, AttributeListEntry};
@@ -61,3 +62,4 @@ pub use runlist::{decode as decode_runlist, Run};
 pub use source::OffsetReader;
 pub use standard_information::StandardInformation;
 pub use time::Filetime;
+pub use usn::{parse_usn_record_v2, FileAttributes, UsnReason, UsnRecord};
