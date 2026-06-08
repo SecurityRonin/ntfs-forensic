@@ -6,11 +6,11 @@
 
 use forensicnomicon::ntfs::{attr_types, SIGNATURE_BAAD, SIGNATURE_FILE};
 
-use crate::attribute::Attribute;
-use crate::file_name::FileName;
-use crate::record::MftRecordHeader;
-use crate::standard_information::StandardInformation;
-use crate::time::Filetime;
+use ntfs_core::attribute::Attribute;
+use ntfs_core::file_name::FileName;
+use ntfs_core::record::MftRecordHeader;
+use ntfs_core::standard_information::StandardInformation;
+use ntfs_core::time::Filetime;
 
 /// `FILETIME` ticks per second (100-ns intervals).
 const TICKS_PER_SECOND: u64 = 10_000_000;
@@ -314,7 +314,7 @@ pub fn audit_record(record: &[u8]) -> Vec<Anomaly> {
         return Vec::new();
     };
     let attributes =
-        crate::attribute::parse_attributes(record, header.first_attribute_offset as usize)
+        ntfs_core::attribute::parse_attributes(record, header.first_attribute_offset as usize)
             .unwrap_or_default();
 
     let resident = |type_code: u32| {
@@ -340,7 +340,7 @@ pub fn audit_record(record: &[u8]) -> Vec<Anomaly> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::attribute::AttributeBody;
+    use ntfs_core::attribute::AttributeBody;
 
     fn si(created: u64, modified: u64, mft_modified: u64, accessed: u64) -> StandardInformation {
         StandardInformation {
@@ -355,7 +355,7 @@ mod tests {
     }
 
     fn fname(created: u64) -> FileName {
-        use crate::file_name::FileReference;
+        use ntfs_core::file_name::FileReference;
         FileName {
             parent: FileReference::from_u64(5),
             created: Filetime(created),

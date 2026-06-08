@@ -1,4 +1,4 @@
-//! # ntfs-forensic
+//! # ntfs-core
 //!
 //! A forensic-grade, from-scratch NTFS reader. It parses NTFS structures
 //! directly from any `Read + Seek` source (a raw image, an EWF/VMDK-backed
@@ -39,7 +39,6 @@ pub mod compress;
 pub mod data;
 pub mod error;
 pub mod file_name;
-pub mod forensic;
 pub mod fs;
 pub mod index;
 pub mod record;
@@ -55,10 +54,6 @@ pub use compress::decompress;
 pub use data::{read_attribute_value, read_runs};
 pub use error::{NtfsError, Result};
 pub use file_name::{FileName, FileReference};
-pub use forensic::{
-    alternate_data_streams, carve_file_records, detect_timestomp, is_deleted, record_slack,
-    TimestompIndicators,
-};
 pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use record::{apply_fixup, MftRecordHeader};

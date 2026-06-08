@@ -23,7 +23,7 @@
 //! is exercised by [`opens_raw_partition_image`] whenever a raw NTFS stream is
 //! supplied via `NTFS_FORENSIC_TEST_IMAGE`.
 
-use ntfs_forensic::BootSector;
+use ntfs_core::BootSector;
 
 /// The real boot sector carved from the DEF CON 2018 CTF image.
 const REAL_BOOT: &[u8] = include_bytes!("data/defcon2018_cdrive_boot.bin");
@@ -57,7 +57,7 @@ fn parses_real_ntfs_boot_sector_matching_tsk() {
 #[test]
 #[ignore = "requires NTFS_FORENSIC_TEST_IMAGE pointing at a raw NTFS partition"]
 fn opens_raw_partition_image() {
-    use ntfs_forensic::NtfsFs;
+    use ntfs_core::NtfsFs;
     use std::fs::File;
 
     let path = match std::env::var("NTFS_FORENSIC_TEST_IMAGE") {
@@ -68,7 +68,7 @@ fn opens_raw_partition_image() {
 
     // Record 0 is $MFT itself and must be an in-use base record.
     let mft = fs.read_record(0).expect("read $MFT record");
-    let hdr = ntfs_forensic::MftRecordHeader::parse(&mft).expect("parse $MFT header");
+    let hdr = ntfs_core::MftRecordHeader::parse(&mft).expect("parse $MFT header");
     assert!(hdr.is_in_use(), "$MFT must be in use");
     assert!(hdr.is_base_record(), "$MFT must be a base record");
 
@@ -81,7 +81,7 @@ fn opens_raw_partition_image() {
     // error — never a panic.
     for n in 0..64 {
         if let Ok(buf) = fs.read_record(n) {
-            let _ = ntfs_forensic::MftRecordHeader::parse(&buf);
+            let _ = ntfs_core::MftRecordHeader::parse(&buf);
         }
     }
 }

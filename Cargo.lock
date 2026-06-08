@@ -630,12 +630,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "ntfs-forensic"
-version = "0.3.0"
+name = "ntfs-core"
+version = "0.4.0"
 dependencies = [
  "forensicnomicon",
  "mft",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "ntfs-forensic"
+version = "0.4.0"
+dependencies = [
+ "forensicnomicon",
+ "ntfs-core",
 ]
 
 [[package]]

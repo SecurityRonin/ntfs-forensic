@@ -1,0 +1,29 @@
+[package]
+name = "ntfs-core"
+version = "0.4.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT"
+description = "Pure-Rust from-scratch NTFS filesystem reader — MFT, attributes, indexes, data runs, over any Read + Seek source"
+repository = "https://github.com/SecurityRonin/ntfs-forensic"
+homepage = "https://github.com/SecurityRonin/ntfs-forensic"
+documentation = "https://docs.rs/ntfs-core"
+readme = "README.md"
+authors = ["Albert Hui <albert@securityronin.com>"]
+keywords = ["forensics", "ntfs", "filesystem", "dfir", "mft"]
+categories = ["parser-implementations", "filesystem"]
+exclude = ["/fuzz", "/.github", "/docs"]
+
+[dependencies]
+thiserror = "2"
+# NTFS on-disk structure knowledge (magic bytes, field offsets, type codes)
+# lives in the KNOWLEDGE layer â the published forensicnomicon crate.
+forensicnomicon = "0.3.1"
+
+[dev-dependencies]
+# Independent oracle for doer-checker validation against real $MFT images
+# (parity gate in tests/parity_mft.rs). MIT/Apache-2.0 â dev-only, no GPL.
+mft = "0.6"
+
+[lints.rust]
+unsafe_code = "forbid"

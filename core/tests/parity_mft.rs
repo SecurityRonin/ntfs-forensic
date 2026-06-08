@@ -15,7 +15,7 @@
 
 use std::collections::HashMap;
 
-use ntfs_forensic::{apply_fixup, parse_attributes, FileName, MftRecordHeader};
+use ntfs_core::{apply_fixup, parse_attributes, FileName, MftRecordHeader};
 
 const FILE_NAME: u32 = 0x30;
 
