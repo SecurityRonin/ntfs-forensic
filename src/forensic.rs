@@ -561,6 +561,103 @@ mod tests {
         assert!(audit_record(b"not even a FILE record").is_empty());
     }
 
+    // ── Builders for an audit_record() end-to-end test (parse → extract → audit) ─
+
+    /// A resident attribute with no name: 24-byte header, content at 0x18.
+    fn resident_attr(type_code: u32, content: &[u8]) -> Vec<u8> {
+        let content_offset = 0x18usize;
+        let length = (content_offset + content.len() + 7) & !7;
+        let mut a = vec![0u8; length];
+        a[0..4].copy_from_slice(&type_code.to_le_bytes()); // TYPE
+        a[4..8].copy_from_slice(&(length as u32).to_le_bytes()); // LENGTH
+        a[8] = 0; // resident
+        a[0x0A..0x0C].copy_from_slice(&(content_offset as u16).to_le_bytes()); // NAME_OFFSET
+        a[0x0E..0x10].copy_from_slice(&1u16.to_le_bytes()); // ATTRIBUTE_ID
+        a[0x10..0x14].copy_from_slice(&(content.len() as u32).to_le_bytes()); // content length
+        a[0x14..0x16].copy_from_slice(&(content_offset as u16).to_le_bytes()); // content offset
+        a[content_offset..content_offset + content.len()].copy_from_slice(content);
+        a
+    }
+
+    fn si_content(created: u64) -> Vec<u8> {
+        let mut c = vec![0u8; 0x30];
+        c[0x00..0x08].copy_from_slice(&created.to_le_bytes()); // $SI created
+        c
+    }
+
+    fn fn_content(created: u64) -> Vec<u8> {
+        let mut c = vec![0u8; 0x44]; // FN_MIN (0x42) + one UTF-16 char
+        c[0x00..0x08].copy_from_slice(&5u64.to_le_bytes()); // parent ref
+        c[0x08..0x10].copy_from_slice(&created.to_le_bytes()); // $FN created
+        c[0x40] = 1; // name length (chars)
+        c[0x41] = 1; // namespace
+        c[0x42..0x44].copy_from_slice(&u16::from(b'f').to_le_bytes());
+        c
+    }
+
+    #[test]
+    fn audit_record_parses_and_flags_timestomp_end_to_end() {
+        // Exercises the full audit_record() path: header parse, attribute parse,
+        // $SI/$FN resident-content extraction, then timestomp detection.
+        // $SI created (1000) far predates $FN created (2e9) → NTFS-TIMESTOMP.
+        let si = resident_attr(attr_types::STANDARD_INFORMATION, &si_content(1_000));
+        let fnm = resident_attr(attr_types::FILE_NAME, &fn_content(2_000_000_000));
+        let first_attr = 0x30usize;
+
+        let mut rec = vec![0u8; 1024];
+        rec[0..4].copy_from_slice(b"FILE");
+        rec[0x04..0x06].copy_from_slice(&0x30u16.to_le_bytes()); // usa_offset
+        rec[0x06..0x08].copy_from_slice(&3u16.to_le_bytes()); // usa_count
+        rec[0x14..0x16].copy_from_slice(&(first_attr as u16).to_le_bytes()); // first attr
+        rec[0x16..0x18].copy_from_slice(&0x01u16.to_le_bytes()); // flags = in use
+        rec[0x1C..0x20].copy_from_slice(&1024u32.to_le_bytes()); // allocated_size
+        rec[0x2C..0x30].copy_from_slice(&7u32.to_le_bytes()); // record_number
+
+        let mut pos = first_attr;
+        rec[pos..pos + si.len()].copy_from_slice(&si);
+        pos += si.len();
+        rec[pos..pos + fnm.len()].copy_from_slice(&fnm);
+        pos += fnm.len();
+        rec[pos..pos + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes()); // end marker
+        rec[0x18..0x1C].copy_from_slice(&((pos + 4) as u32).to_le_bytes()); // used_size
+
+        let anomalies = audit_record(&rec);
+        let timestomped =
+            anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::Timestomp { record: 7, .. }));
+        assert!(timestomped, "{anomalies:?}");
+    }
+
+    #[test]
+    fn audit_components_flags_whole_second_timestomp() {
+        // $SI times on whole seconds (no sub-second precision) → timestomp tell,
+        // exercising the si_whole_second branch of audit_components.
+        let header = hdr(0x01, 1024, 4);
+        let whole = 5 * 10_000_000; // 5s in FILETIME ticks
+        let si = si(whole, whole, whole, whole);
+        let fnm = fname(whole);
+        let an = audit_components(4, &header, &vec![0u8; 1024], &[], Some(&si), Some(&fnm));
+        assert!(an
+            .iter()
+            .any(|a| matches!(&a.kind, AnomalyKind::Timestomp { signal, .. } if signal.contains("whole second"))));
+    }
+
+    #[test]
+    fn every_anomaly_kind_carries_its_record_as_evidence() {
+        use forensicnomicon::report::{Location, Observation};
+        // Drives AnomalyKind::record() for every variant via evidence().
+        let kinds = [
+            AnomalyKind::Timestomp { record: 1, signal: "x" },
+            AnomalyKind::AlternateDataStream { record: 2, stream: "s".to_string() },
+            AnomalyKind::DeletedRecord { record: 3 },
+            AnomalyKind::RecordSlackResidue { record: 4, residue_len: 5 },
+        ];
+        for (i, k) in kinds.into_iter().enumerate() {
+            let ev = Anomaly::new(k).evidence();
+            let rec = (i + 1) as u64;
+            assert!(ev.iter().any(|e| matches!(e.location, Some(Location::RecordId(r)) if r == rec)));
+        }
+    }
+
     #[test]
     fn anomaly_converts_to_canonical_finding() {
         use forensicnomicon::report::{Observation, Source};
