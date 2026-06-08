@@ -14,7 +14,7 @@ keywords = ["forensics", "ntfs", "dfir", "timestomp", "anti-forensics"]
 categories = ["parser-implementations", "filesystem"]
 
 [dependencies]
-ntfs-core = { version = "0.5.0", path = "../core" }
+ntfs-core = { version = "0.6.0", path = "../core" }
 # NTFS structure knowledge + the shared report model (Severity/Observation).
 forensicnomicon = "0.3.1"
 
