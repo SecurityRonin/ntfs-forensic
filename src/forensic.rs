@@ -114,7 +114,6 @@ pub use forensicnomicon::report::Severity;
 /// Classification of an NTFS forensic anomaly. Each variant carries the MFT
 /// record it was observed in plus the evidence to reproduce it.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub enum AnomalyKind {
     /// `$STANDARD_INFORMATION` timestamps show forgery tells relative to the
     /// harder-to-forge `$FILE_NAME` times (or land on whole seconds).
@@ -203,7 +202,6 @@ impl AnomalyKind {
 /// An NTFS forensic anomaly: an observation graded by severity, with a stable
 /// code and note derived from its [`AnomalyKind`] so they cannot drift.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct Anomaly {
     /// Severity, derived from `kind`.
     pub severity: Severity,
