@@ -247,4 +247,88 @@ mod tests {
         let offsets = carve_file_records(&mft, rec);
         assert_eq!(offsets, vec![0, 2 * rec]);
     }
+
+    // ── Anomaly auditor (Tier-2 findings → forensicnomicon::report) ──────────
+
+    fn hdr(flags: u16, used_size: u32, record_number: u64) -> MftRecordHeader {
+        MftRecordHeader {
+            signature: *b"FILE",
+            usa_offset: 0x30,
+            usa_count: 3,
+            lsn: 0,
+            sequence_number: 1,
+            hard_link_count: 1,
+            first_attribute_offset: 0x38,
+            flags,
+            used_size,
+            allocated_size: 1024,
+            base_record: 0,
+            next_attr_id: 1,
+            record_number,
+        }
+    }
+
+    #[test]
+    fn audit_flags_deleted_record() {
+        let header = hdr(0x00, 0x100, 42); // not in use
+        let an = audit_components(42, &header, &vec![0u8; 1024], &[], None, None);
+        assert!(an
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::DeletedRecord { record: 42 })));
+    }
+
+    #[test]
+    fn audit_flags_timestomp() {
+        let header = hdr(0x01, 0x100, 7);
+        let si = si(1_000, 1_000, 1_000, 1_000);
+        let fnm = fname(2_000_000_000);
+        let an = audit_components(7, &header, &vec![0u8; 1024], &[], Some(&si), Some(&fnm));
+        assert!(an
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::Timestomp { .. })));
+    }
+
+    #[test]
+    fn audit_flags_alternate_data_stream() {
+        let header = hdr(0x01, 0x100, 9);
+        let attrs = [data_attr(None), data_attr(Some("evil"))];
+        let an = audit_components(9, &header, &vec![0u8; 1024], &attrs, None, None);
+        assert!(an.iter().any(
+            |a| matches!(&a.kind, AnomalyKind::AlternateDataStream { stream, .. } if stream == "evil")
+        ));
+    }
+
+    #[test]
+    fn audit_flags_slack_residue() {
+        let header = hdr(0x01, 600, 3);
+        let mut record = vec![0u8; 1024];
+        record[700] = 0xAA;
+        let an = audit_components(3, &header, &record, &[], None, None);
+        assert!(an
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::RecordSlackResidue { .. })));
+    }
+
+    #[test]
+    fn audit_clean_record_has_no_anomalies() {
+        let header = hdr(0x01, 1024, 1); // in use, no slack, no attrs
+        let an = audit_components(1, &header, &vec![0u8; 1024], &[], None, None);
+        assert!(an.is_empty(), "clean record: {an:?}");
+    }
+
+    #[test]
+    fn anomaly_converts_to_canonical_finding() {
+        use forensicnomicon::report::{Observation, Source};
+        let a = Anomaly::new(AnomalyKind::Timestomp {
+            record: 5,
+            signal: "test",
+        });
+        let f = a.to_finding(Source {
+            analyzer: "ntfs-forensic".to_string(),
+            scope: "NTFS".to_string(),
+            version: None,
+        });
+        assert!(f.code.starts_with("NTFS-"));
+        assert!(f.severity.is_some());
+    }
 }

@@ -18,7 +18,7 @@ exclude = ["/fuzz", "/.github", "/docs"]
 thiserror = "2"
 # NTFS on-disk structure knowledge (magic bytes, field offsets, type codes)
 # lives in the KNOWLEDGE layer — the published forensicnomicon crate.
-forensicnomicon = "0.2"
+forensicnomicon = "0.3.1"
 
 [dev-dependencies]
 # Independent oracle for doer-checker validation against real $MFT images
