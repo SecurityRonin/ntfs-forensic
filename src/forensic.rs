@@ -162,8 +162,9 @@ impl AnomalyKind {
     pub fn severity(&self) -> Severity {
         match self {
             AnomalyKind::Timestomp { .. } => Severity::High,
-            AnomalyKind::AlternateDataStream { .. }
-            | AnomalyKind::RecordSlackResidue { .. } => Severity::Low,
+            AnomalyKind::AlternateDataStream { .. } | AnomalyKind::RecordSlackResidue { .. } => {
+                Severity::Low
+            }
             AnomalyKind::DeletedRecord { .. } => Severity::Info,
         }
     }
@@ -322,8 +323,8 @@ pub fn audit_record(record: &[u8]) -> Vec<Anomaly> {
             .find(|a| a.type_code == type_code)
             .and_then(|a| a.resident_content(record))
     };
-    let si = resident(attr_types::STANDARD_INFORMATION)
-        .and_then(|c| StandardInformation::parse(c).ok());
+    let si =
+        resident(attr_types::STANDARD_INFORMATION).and_then(|c| StandardInformation::parse(c).ok());
     let fname = resident(attr_types::FILE_NAME).and_then(|c| FileName::parse(c).ok());
 
     audit_components(
