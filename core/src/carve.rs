@@ -4,7 +4,6 @@
 //! at 1024-byte boundaries), validates each candidate, and extracts identity
 //! fields needed for path resolution via the Rewind engine.
 
-
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// MFT entry signature: "FILE"

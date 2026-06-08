@@ -746,8 +746,9 @@ mod tests {
         rec[0x18..0x1C].copy_from_slice(&((pos + 4) as u32).to_le_bytes()); // used_size
 
         let anomalies = audit_record(&rec);
-        let timestomped =
-            anomalies.iter().any(|a| matches!(a.kind, AnomalyKind::Timestomp { record: 7, .. }));
+        let timestomped = anomalies
+            .iter()
+            .any(|a| matches!(a.kind, AnomalyKind::Timestomp { record: 7, .. }));
         assert!(timestomped, "{anomalies:?}");
     }
 
@@ -770,15 +771,26 @@ mod tests {
         use forensicnomicon::report::{Location, Observation};
         // Drives AnomalyKind::record() for every variant via evidence().
         let kinds = [
-            AnomalyKind::Timestomp { record: 1, signal: "x" },
-            AnomalyKind::AlternateDataStream { record: 2, stream: "s".to_string() },
+            AnomalyKind::Timestomp {
+                record: 1,
+                signal: "x",
+            },
+            AnomalyKind::AlternateDataStream {
+                record: 2,
+                stream: "s".to_string(),
+            },
             AnomalyKind::DeletedRecord { record: 3 },
-            AnomalyKind::RecordSlackResidue { record: 4, residue_len: 5 },
+            AnomalyKind::RecordSlackResidue {
+                record: 4,
+                residue_len: 5,
+            },
         ];
         for (i, k) in kinds.into_iter().enumerate() {
             let ev = Anomaly::new(k).evidence();
             let rec = (i + 1) as u64;
-            assert!(ev.iter().any(|e| matches!(e.location, Some(Location::RecordId(r)) if r == rec)));
+            assert!(ev
+                .iter()
+                .any(|e| matches!(e.location, Some(Location::RecordId(r)) if r == rec)));
         }
     }
 

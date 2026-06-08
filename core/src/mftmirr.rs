@@ -56,7 +56,6 @@ pub fn compare_mft_mirror(mft_data: &[u8], mftmirr_data: &[u8]) -> Result<Mirror
                 diff_offsets[i].push(offset);
             }
         }
-
     }
 
     Ok(MirrorComparison {
