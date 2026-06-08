@@ -99,6 +99,245 @@ pub fn carve_file_records(mft: &[u8], record_size: usize) -> Vec<usize> {
     offsets
 }
 
+// ── Tier-2 anomaly auditor (findings → forensicnomicon::report) ──────────────
+//
+// The primitives above answer "what does this record show?"; the auditor grades
+// those observations into severity-ranked findings on the shared
+// `forensicnomicon::report` model, so an NTFS volume's anomalies aggregate
+// uniformly with the partition/container layers. Each anomaly is an
+// *observation* ("consistent with …"); the examiner draws the conclusions.
+
+/// The canonical 5-level severity scale, shared across every `SecurityRonin`
+/// analyzer via [`forensicnomicon::report`].
+pub use forensicnomicon::report::Severity;
+
+/// Classification of an NTFS forensic anomaly. Each variant carries the MFT
+/// record it was observed in plus the evidence to reproduce it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub enum AnomalyKind {
+    /// `$STANDARD_INFORMATION` timestamps show forgery tells relative to the
+    /// harder-to-forge `$FILE_NAME` times (or land on whole seconds).
+    Timestomp {
+        /// MFT record number.
+        record: u64,
+        /// The specific tell that fired.
+        signal: &'static str,
+    },
+    /// A named `$DATA` attribute — an alternate data stream, a common place to
+    /// carry hidden payloads (also used benignly, e.g. `Zone.Identifier`).
+    AlternateDataStream {
+        /// MFT record number.
+        record: u64,
+        /// The stream name.
+        stream: String,
+    },
+    /// The MFT record is not in use — a recoverable deleted file.
+    DeletedRecord {
+        /// MFT record number.
+        record: u64,
+    },
+    /// Non-zero residue in the record's slack (past `used_size`).
+    RecordSlackResidue {
+        /// MFT record number.
+        record: u64,
+        /// Count of non-zero bytes in the slack.
+        residue_len: usize,
+    },
+}
+
+impl AnomalyKind {
+    /// The MFT record this anomaly was observed in.
+    #[must_use]
+    pub fn record(&self) -> u64 {
+        match self {
+            AnomalyKind::Timestomp { record, .. }
+            | AnomalyKind::AlternateDataStream { record, .. }
+            | AnomalyKind::DeletedRecord { record }
+            | AnomalyKind::RecordSlackResidue { record, .. } => *record,
+        }
+    }
+
+    /// Severity — the single source of truth for this kind.
+    #[must_use]
+    pub fn severity(&self) -> Severity {
+        match self {
+            AnomalyKind::Timestomp { .. } => Severity::High,
+            AnomalyKind::AlternateDataStream { .. }
+            | AnomalyKind::RecordSlackResidue { .. } => Severity::Low,
+            AnomalyKind::DeletedRecord { .. } => Severity::Info,
+        }
+    }
+
+    /// Stable machine-readable code.
+    #[must_use]
+    pub fn code(&self) -> &'static str {
+        match self {
+            AnomalyKind::Timestomp { .. } => "NTFS-TIMESTOMP",
+            AnomalyKind::AlternateDataStream { .. } => "NTFS-ADS",
+            AnomalyKind::DeletedRecord { .. } => "NTFS-DELETED-RECORD",
+            AnomalyKind::RecordSlackResidue { .. } => "NTFS-SLACK-RESIDUE",
+        }
+    }
+
+    /// Human-readable, "consistent with" note.
+    #[must_use]
+    pub fn note(&self) -> String {
+        match self {
+            AnomalyKind::Timestomp { record, signal } => format!(
+                "record {record}: $STANDARD_INFORMATION timestamps consistent with tampering ({signal})"
+            ),
+            AnomalyKind::AlternateDataStream { record, stream } => format!(
+                "record {record}: named $DATA stream `{stream}` — consistent with data carried in an alternate data stream"
+            ),
+            AnomalyKind::DeletedRecord { record } => {
+                format!("record {record}: MFT entry not in use — a recoverable deleted file")
+            }
+            AnomalyKind::RecordSlackResidue { record, residue_len } => format!(
+                "record {record}: {residue_len} non-zero byte(s) in MFT-record slack — consistent with residue from an overwritten resident attribute"
+            ),
+        }
+    }
+}
+
+/// An NTFS forensic anomaly: an observation graded by severity, with a stable
+/// code and note derived from its [`AnomalyKind`] so they cannot drift.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct Anomaly {
+    /// Severity, derived from `kind`.
+    pub severity: Severity,
+    /// Stable machine-readable code, derived from `kind`.
+    pub code: &'static str,
+    /// The classified anomaly with its evidence.
+    pub kind: AnomalyKind,
+    /// Human-readable note, derived from `kind`.
+    pub note: String,
+}
+
+impl Anomaly {
+    /// Build an [`Anomaly`], deriving severity/code/note from `kind`.
+    #[must_use]
+    pub fn new(kind: AnomalyKind) -> Self {
+        Anomaly {
+            severity: kind.severity(),
+            code: kind.code(),
+            note: kind.note(),
+            kind,
+        }
+    }
+}
+
+impl forensicnomicon::report::Observation for Anomaly {
+    fn severity(&self) -> Option<Severity> {
+        Some(self.severity)
+    }
+    fn code(&self) -> &'static str {
+        self.code
+    }
+    fn note(&self) -> String {
+        self.note.clone()
+    }
+    fn evidence(&self) -> Vec<forensicnomicon::report::Evidence> {
+        let record = self.kind.record();
+        vec![forensicnomicon::report::Evidence {
+            field: "mft record".to_string(),
+            value: record.to_string(),
+            location: Some(forensicnomicon::report::Location::RecordId(record)),
+        }]
+    }
+}
+
+/// Audit a parsed MFT record's components for anomalies. The caller supplies the
+/// already-parsed pieces, so this is exact and side-effect free; see
+/// [`audit_record`] for the convenience that parses raw bytes.
+#[must_use]
+pub fn audit_components(
+    record_number: u64,
+    header: &MftRecordHeader,
+    record: &[u8],
+    attributes: &[Attribute],
+    standard_information: Option<&StandardInformation>,
+    primary_file_name: Option<&FileName>,
+) -> Vec<Anomaly> {
+    let mut out = Vec::new();
+
+    if is_deleted(header) {
+        out.push(Anomaly::new(AnomalyKind::DeletedRecord {
+            record: record_number,
+        }));
+    }
+
+    let residue = record_slack(record, header)
+        .iter()
+        .filter(|&&b| b != 0)
+        .count();
+    if residue > 0 {
+        out.push(Anomaly::new(AnomalyKind::RecordSlackResidue {
+            record: record_number,
+            residue_len: residue,
+        }));
+    }
+
+    for ads in alternate_data_streams(attributes) {
+        out.push(Anomaly::new(AnomalyKind::AlternateDataStream {
+            record: record_number,
+            stream: ads.name.clone().unwrap_or_default(),
+        }));
+    }
+
+    if let (Some(si), Some(fname)) = (standard_information, primary_file_name) {
+        let ind = detect_timestomp(si, fname);
+        if ind.si_created_before_fn {
+            out.push(Anomaly::new(AnomalyKind::Timestomp {
+                record: record_number,
+                signal: "$SI created before $FN",
+            }));
+        }
+        if ind.si_whole_second {
+            out.push(Anomaly::new(AnomalyKind::Timestomp {
+                record: record_number,
+                signal: "$SI timestamp on a whole second",
+            }));
+        }
+    }
+
+    out
+}
+
+/// Audit a single raw MFT record's bytes: parse the header and attributes,
+/// extract `$STANDARD_INFORMATION`/`$FILE_NAME`, and delegate to
+/// [`audit_components`]. A record whose header does not parse yields no
+/// anomalies (structural corruption is surfaced by the reader/carver).
+#[must_use]
+pub fn audit_record(record: &[u8]) -> Vec<Anomaly> {
+    let Ok(header) = MftRecordHeader::parse(record) else {
+        return Vec::new();
+    };
+    let attributes =
+        crate::attribute::parse_attributes(record, header.first_attribute_offset as usize)
+            .unwrap_or_default();
+
+    let resident = |type_code: u32| {
+        attributes
+            .iter()
+            .find(|a| a.type_code == type_code)
+            .and_then(|a| a.resident_content(record))
+    };
+    let si = resident(attr_types::STANDARD_INFORMATION)
+        .and_then(|c| StandardInformation::parse(c).ok());
+    let fname = resident(attr_types::FILE_NAME).and_then(|c| FileName::parse(c).ok());
+
+    audit_components(
+        u64::from(header.record_number),
+        &header,
+        record,
+        &attributes,
+        si.as_ref(),
+        fname.as_ref(),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,7 +489,7 @@ mod tests {
 
     // ── Anomaly auditor (Tier-2 findings → forensicnomicon::report) ──────────
 
-    fn hdr(flags: u16, used_size: u32, record_number: u64) -> MftRecordHeader {
+    fn hdr(flags: u16, used_size: u32, record_number: u32) -> MftRecordHeader {
         MftRecordHeader {
             signature: *b"FILE",
             usa_offset: 0x30,
@@ -314,6 +553,13 @@ mod tests {
         let header = hdr(0x01, 1024, 1); // in use, no slack, no attrs
         let an = audit_components(1, &header, &vec![0u8; 1024], &[], None, None);
         assert!(an.is_empty(), "clean record: {an:?}");
+    }
+
+    #[test]
+    fn audit_record_on_non_record_bytes_is_empty_not_panic() {
+        // A header that does not parse yields no anomalies (no panic).
+        assert!(audit_record(&[0u8; 16]).is_empty());
+        assert!(audit_record(b"not even a FILE record").is_empty());
     }
 
     #[test]
