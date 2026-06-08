@@ -9,6 +9,7 @@
 
 use forensicnomicon::ntfs::filename_namespace;
 
+use crate::bytes::{arr, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 use crate::time::Filetime;
 
@@ -90,12 +91,11 @@ impl FileName {
             });
         }
 
-        let parent =
-            FileReference::from_u64(u64::from_le_bytes(content[0x00..0x08].try_into().unwrap()));
-        let ft = |o: usize| Filetime::from_le(content[o..o + 8].try_into().unwrap());
-        let allocated_size = u64::from_le_bytes(content[0x28..0x30].try_into().unwrap());
-        let real_size = u64::from_le_bytes(content[0x30..0x38].try_into().unwrap());
-        let flags = u32::from_le_bytes(content[0x38..0x3C].try_into().unwrap());
+        let parent = FileReference::from_u64(le_u64(content, 0x00));
+        let ft = |o: usize| Filetime::from_le(&arr(content, o));
+        let allocated_size = le_u64(content, 0x28);
+        let real_size = le_u64(content, 0x30);
+        let flags = le_u32(content, 0x38);
 
         let name_length = content[0x40] as usize;
         let namespace = content[0x41];

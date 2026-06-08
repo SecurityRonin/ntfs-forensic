@@ -129,7 +129,7 @@ fn try_carve_entry(
     }
 
     let flags = read_u16_le(entry, 22);
-    let entry_number = read_u32_le(entry, 44) as u64;
+    let entry_number = u64::from(read_u32_le(entry, 44));
 
     // Walk attributes looking for FILE_NAME (0x30)
     let mut best_filename: Option<(String, u64, u16, u8)> = None; // (name, parent_entry, parent_seq, namespace)
@@ -178,28 +178,25 @@ fn try_carve_entry(
         attrs_walked += 1;
     }
 
-    match best_filename {
-        Some((filename, parent_entry, parent_sequence, _)) => {
-            Some(CarvedMftEntry {
-                offset,
-                entry_number,
-                sequence_number,
-                filename,
-                parent_entry,
-                parent_sequence,
-                is_directory: flags & 0x02 != 0,
-                is_in_use: flags & 0x01 != 0,
-            })
-        }
-        None => {
-            stats.rejected += 1;
-            None
-        }
+    if let Some((filename, parent_entry, parent_sequence, _)) = best_filename {
+        Some(CarvedMftEntry {
+            offset,
+            entry_number,
+            sequence_number,
+            filename,
+            parent_entry,
+            parent_sequence,
+            is_directory: flags & 0x02 != 0,
+            is_in_use: flags & 0x01 != 0,
+        })
+    } else {
+        stats.rejected += 1;
+        None
     }
 }
 
 /// Parse a FILE_NAME attribute and extract identity fields.
-/// Returns (filename, parent_entry, parent_sequence, namespace).
+/// Returns (filename, `parent_entry`, `parent_sequence`, namespace).
 fn parse_filename_attr(entry: &[u8], attr_offset: usize) -> Option<(String, u64, u16, u8)> {
     let content_offset = read_u16_le(entry, attr_offset + 20) as usize;
     let content_size = read_u32_le(entry, attr_offset + 16) as usize;
@@ -269,6 +266,7 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::cast_lossless)]
 mod tests {
     use super::*;
 

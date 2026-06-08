@@ -18,6 +18,7 @@ use forensicnomicon::ntfs::{
     attr_flags as flag, attr_offsets as o, attr_types, attribute_type_name,
 };
 
+use crate::bytes::{le_u16, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 
 /// Minimum bytes of a common attribute header (through attribute id).
@@ -129,10 +130,10 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
 
     for _ in 0..MAX_ATTRIBUTES {
         // Need 4 bytes to read the type / end marker; run-off-the-end stops cleanly.
-        let Some(type_bytes) = record.get(pos + o::TYPE..pos + o::TYPE + 4) else {
+        if record.get(pos + o::TYPE..pos + o::TYPE + 4).is_none() {
             break;
-        };
-        let type_code = u32::from_le_bytes(type_bytes.try_into().unwrap());
+        }
+        let type_code = le_u32(record, pos + o::TYPE);
         if type_code == attr_types::END {
             break;
         }
@@ -141,11 +142,7 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
             return Err(bad(pos, "header runs past record"));
         }
 
-        let length = u32::from_le_bytes(
-            record[pos + o::LENGTH..pos + o::LENGTH + 4]
-                .try_into()
-                .unwrap(),
-        );
+        let length = le_u32(record, pos + o::LENGTH);
         if (length as usize) < HEADER_MIN {
             return Err(bad(pos, "length below header minimum"));
         }
@@ -158,21 +155,9 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
 
         let non_resident = record[pos + o::NON_RESIDENT] != 0;
         let name_length = record[pos + o::NAME_LENGTH] as usize;
-        let name_offset = u16::from_le_bytes(
-            record[pos + o::NAME_OFFSET..pos + o::NAME_OFFSET + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
-        let flags = u16::from_le_bytes(
-            record[pos + o::FLAGS..pos + o::FLAGS + 2]
-                .try_into()
-                .unwrap(),
-        );
-        let attribute_id = u16::from_le_bytes(
-            record[pos + o::ATTRIBUTE_ID..pos + o::ATTRIBUTE_ID + 2]
-                .try_into()
-                .unwrap(),
-        );
+        let name_offset = le_u16(record, pos + o::NAME_OFFSET) as usize;
+        let flags = le_u16(record, pos + o::FLAGS);
+        let attribute_id = le_u16(record, pos + o::ATTRIBUTE_ID);
 
         // Optional name, bounded by both the attribute's length and the record.
         let name = if name_length == 0 {
@@ -205,12 +190,8 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
             if pos + NONRESIDENT_MIN > end {
                 return Err(bad(pos, "non-resident header runs past attribute"));
             }
-            let u64at = |rel: usize| {
-                u64::from_le_bytes(record[pos + rel..pos + rel + 8].try_into().unwrap())
-            };
-            let u16at = |rel: usize| {
-                u16::from_le_bytes(record[pos + rel..pos + rel + 2].try_into().unwrap())
-            };
+            let u64at = |rel: usize| le_u64(record, pos + rel);
+            let u16at = |rel: usize| le_u16(record, pos + rel);
             AttributeBody::NonResident {
                 start_vcn: u64at(o::NR_START_VCN),
                 last_vcn: u64at(o::NR_LAST_VCN),
@@ -224,16 +205,8 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
             if pos + RESIDENT_MIN > end {
                 return Err(bad(pos, "resident header runs past attribute"));
             }
-            let content_length = u32::from_le_bytes(
-                record[pos + o::RES_CONTENT_LENGTH..pos + o::RES_CONTENT_LENGTH + 4]
-                    .try_into()
-                    .unwrap(),
-            );
-            let content_offset = u16::from_le_bytes(
-                record[pos + o::RES_CONTENT_OFFSET..pos + o::RES_CONTENT_OFFSET + 2]
-                    .try_into()
-                    .unwrap(),
-            );
+            let content_length = le_u32(record, pos + o::RES_CONTENT_LENGTH);
+            let content_offset = le_u16(record, pos + o::RES_CONTENT_OFFSET);
             let cstart = pos
                 .checked_add(content_offset as usize)
                 .ok_or_else(|| bad(pos, "content offset overflow"))?;

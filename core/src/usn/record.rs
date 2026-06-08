@@ -158,7 +158,7 @@ pub fn parse_usn_record_v2(data: &[u8]) -> Result<UsnRecord> {
     let filename_offset = read_u16_le(data, 0x3A) as usize;
 
     let timestamp = filetime_to_datetime(timestamp_raw)
-        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap_or_default());
 
     // Parse UTF-16LE filename
     let filename = if filename_offset + filename_length <= data.len() && filename_length >= 2 {
@@ -228,7 +228,7 @@ pub fn parse_usn_record_v3(data: &[u8]) -> Result<UsnRecord> {
     let filename_offset = read_u16_le(data, 0x4A) as usize;
 
     let timestamp = filetime_to_datetime(timestamp_raw)
-        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap());
+        .unwrap_or_else(|| DateTime::from_timestamp(0, 0).unwrap_or_default());
 
     let filename = if filename_offset + filename_length <= data.len() && filename_length >= 2 {
         let name_bytes = &data[filename_offset..filename_offset + filename_length];
@@ -348,6 +348,7 @@ pub fn parse_usn_journal(data: &[u8]) -> Result<Vec<UsnRecord>> {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unreadable_literal, clippy::cast_lossless)]
 mod tests {
     use super::*;
 

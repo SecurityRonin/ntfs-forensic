@@ -6,6 +6,7 @@
 
 use forensicnomicon::ntfs::attribute_type_name;
 
+use crate::bytes::{le_u16, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 use crate::file_name::FileReference;
 
@@ -51,8 +52,7 @@ pub fn parse(content: &[u8]) -> Result<Vec<AttributeListEntry>> {
         if pos + ENTRY_MIN > content.len() {
             break;
         }
-        let entry_length =
-            u16::from_le_bytes(content[pos + 0x04..pos + 0x06].try_into().unwrap()) as usize;
+        let entry_length = le_u16(content, pos + 0x04) as usize;
         if entry_length < ENTRY_MIN {
             return Err(NtfsError::BadAttributeList("entry length below minimum"));
         }
@@ -63,14 +63,12 @@ pub fn parse(content: &[u8]) -> Result<Vec<AttributeListEntry>> {
             return Err(NtfsError::BadAttributeList("entry extends past content"));
         }
 
-        let type_code = u32::from_le_bytes(content[pos..pos + 4].try_into().unwrap());
+        let type_code = le_u32(content, pos);
         let name_length = content[pos + 0x06] as usize;
         let name_offset = content[pos + 0x07] as usize;
-        let start_vcn = u64::from_le_bytes(content[pos + 0x08..pos + 0x10].try_into().unwrap());
-        let base_reference = FileReference::from_u64(u64::from_le_bytes(
-            content[pos + 0x10..pos + 0x18].try_into().unwrap(),
-        ));
-        let attribute_id = u16::from_le_bytes(content[pos + 0x18..pos + 0x1A].try_into().unwrap());
+        let start_vcn = le_u64(content, pos + 0x08);
+        let base_reference = FileReference::from_u64(le_u64(content, pos + 0x10));
+        let attribute_id = le_u16(content, pos + 0x18);
 
         let name = if name_length == 0 {
             None

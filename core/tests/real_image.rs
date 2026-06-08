@@ -23,6 +23,8 @@
 //! is exercised by [`opens_raw_partition_image`] whenever a raw NTFS stream is
 //! supplied via `NTFS_FORENSIC_TEST_IMAGE`.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use ntfs_core::BootSector;
 
 /// The real boot sector carved from the DEF CON 2018 CTF image.

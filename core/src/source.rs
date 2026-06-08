@@ -74,9 +74,9 @@ impl<R: Read + Seek> Seek for OffsetReader<R> {
         // Resolve the requested position relative to the window, as a signed
         // value so we can reject seeks before the start.
         let target: i128 = match from {
-            SeekFrom::Start(n) => n as i128,
-            SeekFrom::Current(d) => self.pos as i128 + d as i128,
-            SeekFrom::End(d) => self.len as i128 + d as i128,
+            SeekFrom::Start(n) => i128::from(n),
+            SeekFrom::Current(d) => i128::from(self.pos) + i128::from(d),
+            SeekFrom::End(d) => i128::from(self.len) + i128::from(d),
         };
         if target < 0 {
             return Err(std::io::Error::new(

@@ -18,5 +18,5 @@ ntfs-core = { version = "0.6.0", path = "../core" }
 # NTFS structure knowledge + the shared report model (Severity/Observation).
 forensicnomicon = "0.3.1"
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

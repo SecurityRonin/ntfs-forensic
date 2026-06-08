@@ -21,6 +21,7 @@
 
 use forensicnomicon::ntfs::{boot_offsets as off, OEM_ID};
 
+use crate::bytes::{arr, le_u16, le_u64};
 use crate::error::{NtfsError, Result};
 
 /// Highest offset we read (volume serial ends at 0x50); we require this many bytes.
@@ -86,16 +87,12 @@ impl BootSector {
             });
         }
 
-        let oem: [u8; 8] = sector[off::OEM_ID..off::OEM_ID + 8].try_into().unwrap();
+        let oem: [u8; 8] = arr(sector, off::OEM_ID);
         if oem != OEM_ID {
             return Err(NtfsError::BadOemId(oem));
         }
 
-        let bytes_per_sector = u16::from_le_bytes(
-            sector[off::BYTES_PER_SECTOR..off::BYTES_PER_SECTOR + 2]
-                .try_into()
-                .unwrap(),
-        );
+        let bytes_per_sector = le_u16(sector, off::BYTES_PER_SECTOR);
         if !(256..=4096).contains(&bytes_per_sector) || !bytes_per_sector.is_power_of_two() {
             return Err(NtfsError::BadBytesPerSector(bytes_per_sector));
         }
@@ -106,18 +103,9 @@ impl BootSector {
         }
 
         let cluster_size = u64::from(bytes_per_sector) * u64::from(sectors_per_cluster);
-        let total_sectors = u64::from_le_bytes(
-            sector[off::TOTAL_SECTORS..off::TOTAL_SECTORS + 8]
-                .try_into()
-                .unwrap(),
-        );
-        let mft_lcn =
-            u64::from_le_bytes(sector[off::MFT_LCN..off::MFT_LCN + 8].try_into().unwrap());
-        let mftmirr_lcn = u64::from_le_bytes(
-            sector[off::MFTMIRR_LCN..off::MFTMIRR_LCN + 8]
-                .try_into()
-                .unwrap(),
-        );
+        let total_sectors = le_u64(sector, off::TOTAL_SECTORS);
+        let mft_lcn = le_u64(sector, off::MFT_LCN);
+        let mftmirr_lcn = le_u64(sector, off::MFTMIRR_LCN);
 
         let cpr = sector[off::CLUSTERS_PER_RECORD];
         let mft_record_size =
@@ -126,11 +114,7 @@ impl BootSector {
         let index_record_size =
             record_size(cpi, cluster_size).ok_or(NtfsError::BadIndexRecordSize(cpi))?;
 
-        let volume_serial = u64::from_le_bytes(
-            sector[off::VOLUME_SERIAL..off::VOLUME_SERIAL + 8]
-                .try_into()
-                .unwrap(),
-        );
+        let volume_serial = le_u64(sector, off::VOLUME_SERIAL);
 
         Ok(BootSector {
             bytes_per_sector,

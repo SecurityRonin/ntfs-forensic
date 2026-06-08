@@ -29,5 +29,5 @@ chrono = "0.4"
 # (parity gate in tests/parity_mft.rs). MIT/Apache-2.0 â dev-only, no GPL.
 mft = "0.6"
 
-[lints.rust]
-unsafe_code = "forbid"
+[lints]
+workspace = true

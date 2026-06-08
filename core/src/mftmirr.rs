@@ -67,6 +67,7 @@ pub fn compare_mft_mirror(mft_data: &[u8], mftmirr_data: &[u8]) -> Result<Mirror
 }
 
 #[cfg(test)]
+#[allow(clippy::redundant_closure_for_method_calls)]
 mod tests {
     use super::*;
 

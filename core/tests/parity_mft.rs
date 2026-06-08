@@ -13,6 +13,8 @@
 //! and the in-use / is-directory flags and the best Win32 file name are
 //! compared. The gate fails on any flag disagreement.
 
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
 use std::collections::HashMap;
 
 use ntfs_core::{apply_fixup, parse_attributes, FileName, MftRecordHeader};

@@ -87,7 +87,7 @@ fn read_u64_le(data: &[u8], offset: usize) -> u64 {
 
 /// Try to parse a USN_RECORD_V2 at the given position in a data slice.
 ///
-/// Performs pre-validation before calling parse_usn_record_v2 to avoid
+/// Performs pre-validation before calling `parse_usn_record_v2` to avoid
 /// excessive error paths on random data.
 fn try_parse_usn_at(data: &[u8], offset: usize) -> Option<UsnRecord> {
     if offset + USN_V2_MIN_SIZE > data.len() {
@@ -308,6 +308,7 @@ pub fn extract_usn_from_logfile(logfile_data: &[u8]) -> Vec<LogFileUsnRecord> {
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
+#[allow(clippy::unreadable_literal, clippy::cast_lossless)]
 mod tests {
     use super::*;
 

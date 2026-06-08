@@ -31,10 +31,12 @@
 //! a real disk image (see `tests/real_image.rs`).
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod attribute;
 pub mod attribute_list;
 pub mod boot;
+mod bytes;
 pub mod compress;
 pub mod data;
 pub mod error;

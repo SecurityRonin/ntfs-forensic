@@ -12,6 +12,7 @@
 
 use forensicnomicon::ntfs::SIGNATURE_INDX as INDX_SIGNATURE;
 
+use crate::bytes::{le_u16, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 use crate::file_name::{FileName, FileReference};
 use crate::record::apply_fixup;
@@ -84,7 +85,7 @@ impl IndexRoot {
                 got: content.len(),
             });
         }
-        let indexed_type = u32::from_le_bytes(content[0x00..0x04].try_into().unwrap());
+        let indexed_type = le_u32(content, 0x00);
         let (entries, is_large) = parse_index_header(content, ROOT_HEADER_LEN)?;
         Ok(IndexRoot {
             indexed_type,
@@ -103,7 +104,7 @@ fn parse_index_header(node: &[u8], base: usize) -> Result<(Vec<IndexEntry>, bool
     if header_end > node.len() {
         return Err(NtfsError::BadIndex("index header past buffer"));
     }
-    let u32at = |o: usize| u32::from_le_bytes(node[base + o..base + o + 4].try_into().unwrap());
+    let u32at = |o: usize| le_u32(node, base + o);
     let first_entry = u32at(ih::FIRST_ENTRY) as usize;
     let total_size = u32at(ih::TOTAL_SIZE) as usize;
     let is_large = u32at(ih::FLAGS) & IH_FLAG_LARGE != 0;
@@ -138,11 +139,7 @@ pub fn parse_entries(node: &[u8], start: usize, end: usize) -> Result<Vec<IndexE
         if pos + ENTRY_MIN > end {
             break; // no room for another entry header
         }
-        let entry_length = u16::from_le_bytes(
-            node[pos + ie::ENTRY_LENGTH..pos + ie::ENTRY_LENGTH + 2]
-                .try_into()
-                .unwrap(),
-        ) as usize;
+        let entry_length = le_u16(node, pos + ie::ENTRY_LENGTH) as usize;
         if entry_length < ENTRY_MIN {
             return Err(NtfsError::BadIndex("entry length below minimum"));
         }
@@ -155,20 +152,14 @@ pub fn parse_entries(node: &[u8], start: usize, end: usize) -> Result<Vec<IndexE
 
         let flags = node[pos + ie::FLAGS];
         let is_last = flags & IE_FLAG_LAST != 0;
-        let file_reference = FileReference::from_u64(u64::from_le_bytes(
-            node[pos + ie::FILE_REFERENCE..pos + ie::FILE_REFERENCE + 8]
-                .try_into()
-                .unwrap(),
-        ));
+        let file_reference = FileReference::from_u64(le_u64(node, pos + ie::FILE_REFERENCE));
 
         let child_vcn = if flags & IE_FLAG_SUBNODE != 0 {
             if entry_end < pos + ENTRY_MIN + 8 {
                 return Err(NtfsError::BadIndex("sub-node VCN does not fit in entry"));
             }
             let vcn_pos = entry_end - 8;
-            Some(u64::from_le_bytes(
-                node[vcn_pos..vcn_pos + 8].try_into().unwrap(),
-            ))
+            Some(le_u64(node, vcn_pos))
         } else {
             None
         };
@@ -176,11 +167,7 @@ pub fn parse_entries(node: &[u8], start: usize, end: usize) -> Result<Vec<IndexE
         let file_name = if is_last {
             None
         } else {
-            let stream_length = u16::from_le_bytes(
-                node[pos + ie::STREAM_LENGTH..pos + ie::STREAM_LENGTH + 2]
-                    .try_into()
-                    .unwrap(),
-            ) as usize;
+            let stream_length = le_u16(node, pos + ie::STREAM_LENGTH) as usize;
             let s_start = pos + ie::STREAM;
             let s_end = s_start
                 .checked_add(stream_length)

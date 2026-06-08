@@ -13,6 +13,7 @@
 
 use forensicnomicon::ntfs::{mft_flags, mft_offsets as off, SIGNATURE_BAAD, SIGNATURE_FILE};
 
+use crate::bytes::{arr, le_u16, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 
 /// Bytes required to read the full record header (through the record number at 0x2C).
@@ -92,14 +93,14 @@ impl MftRecordHeader {
             });
         }
 
-        let signature: [u8; 4] = buf[off::SIGNATURE..off::SIGNATURE + 4].try_into().unwrap();
+        let signature: [u8; 4] = arr(buf, off::SIGNATURE);
         if signature != SIGNATURE_FILE && signature != SIGNATURE_BAAD {
             return Err(NtfsError::BadRecordSignature(signature));
         }
 
-        let u16at = |o: usize| u16::from_le_bytes(buf[o..o + 2].try_into().unwrap());
-        let u32at = |o: usize| u32::from_le_bytes(buf[o..o + 4].try_into().unwrap());
-        let u64at = |o: usize| u64::from_le_bytes(buf[o..o + 8].try_into().unwrap());
+        let u16at = |o: usize| le_u16(buf, o);
+        let u32at = |o: usize| le_u32(buf, o);
+        let u64at = |o: usize| le_u64(buf, o);
 
         Ok(MftRecordHeader {
             signature,
@@ -143,13 +144,8 @@ pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<()> {
         ));
     }
 
-    let usa_offset = u16::from_le_bytes(
-        buf[off::USA_OFFSET..off::USA_OFFSET + 2]
-            .try_into()
-            .unwrap(),
-    ) as usize;
-    let usa_count =
-        u16::from_le_bytes(buf[off::USA_COUNT..off::USA_COUNT + 2].try_into().unwrap()) as usize;
+    let usa_offset = le_u16(buf, off::USA_OFFSET) as usize;
+    let usa_count = le_u16(buf, off::USA_COUNT) as usize;
     if usa_count == 0 {
         return Err(NtfsError::BadUpdateSequence("usa_count is zero"));
     }
@@ -172,7 +168,7 @@ pub fn apply_fixup(buf: &mut [u8], sector_size: usize) -> Result<()> {
         ));
     }
 
-    let usn = u16::from_le_bytes(buf[usa_offset..usa_offset + 2].try_into().unwrap());
+    let usn = le_u16(buf, usa_offset);
 
     for i in 0..fixup_sectors {
         let tail = (i + 1) * sector_size - 2;

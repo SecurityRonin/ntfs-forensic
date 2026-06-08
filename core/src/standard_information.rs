@@ -6,6 +6,7 @@
 //! against the `$FILE_NAME` set (see [`crate::file_name`]) is the classic
 //! timestomping check — wired in at the Tier-2 forensic layer.
 
+use crate::bytes::{arr, le_u32, le_u64};
 use crate::error::{NtfsError, Result};
 use crate::time::Filetime;
 
@@ -70,14 +71,11 @@ impl StandardInformation {
                 got: content.len(),
             });
         }
-        let ft = |o: usize| Filetime::from_le(content[o..o + 8].try_into().unwrap());
-        let file_attributes = u32::from_le_bytes(content[0x20..0x24].try_into().unwrap());
+        let ft = |o: usize| Filetime::from_le(&arr(content, o));
+        let file_attributes = le_u32(content, 0x20);
 
         let (security_id, usn) = if content.len() >= SI_V3 {
-            (
-                Some(u32::from_le_bytes(content[0x34..0x38].try_into().unwrap())),
-                Some(u64::from_le_bytes(content[0x40..0x48].try_into().unwrap())),
-            )
+            (Some(le_u32(content, 0x34)), Some(le_u64(content, 0x40)))
         } else {
             (None, None)
         };
