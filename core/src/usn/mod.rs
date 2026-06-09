@@ -12,5 +12,6 @@ mod reader;
 mod record;
 
 pub use attributes::FileAttributes;
+pub use reader::UsnJournalReader;
 pub use reason::UsnReason;
 pub use record::{parse_usn_journal, parse_usn_record_v2, parse_usn_record_v3, UsnRecord};

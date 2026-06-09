@@ -1,8 +1,200 @@
+//! Streaming iterator over USN journal records.
+//!
+//! For multi-GB `$UsnJrnl:$J` journals where loading everything into memory is
+//! impractical, [`UsnJournalReader`] walks a `Read + Seek` source in 64 `KiB`
+//! windows, skipping the zero-filled gaps the change journal leaves behind and
+//! decoding each `USN_RECORD_V2`/`V3` it finds via the `crate::usn` parsers.
+
+use std::io::{Read, Seek, SeekFrom};
+
+use crate::error::Result;
+use crate::usn::{parse_usn_record_v2, parse_usn_record_v3, UsnRecord};
+
+const BUF_SIZE: usize = 64 * 1024; // 64KB read buffer
+
+/// Reads a little-endian `u32` at `offset`, yielding 0 if out of bounds.
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    let mut b = [0u8; 4];
+    if let Some(s) = data.get(offset..offset + 4) {
+        b.copy_from_slice(s);
+    }
+    u32::from_le_bytes(b)
+}
+
+/// Reads a little-endian `u16` at `offset`, yielding 0 if out of bounds.
+fn read_u16_le(data: &[u8], offset: usize) -> u16 {
+    let mut b = [0u8; 2];
+    if let Some(s) = data.get(offset..offset + 2) {
+        b.copy_from_slice(s);
+    }
+    u16::from_le_bytes(b)
+}
+
+/// Streaming iterator over USN records from a reader.
+///
+/// For multi-GB journals where loading everything into memory is impractical.
+pub struct UsnJournalReader<R: Read + Seek> {
+    reader: R,
+    buf: Vec<u8>,
+    buf_len: usize,
+    buf_offset: usize,
+    stream_pos: u64,
+    total_size: u64,
+    done: bool,
+}
+
+impl<R: Read + Seek> UsnJournalReader<R> {
+    /// Creates a streaming reader, recording the source's total length.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`crate::error::NtfsError::Io`] if the initial seeks fail.
+    pub fn new(mut reader: R) -> Result<Self> {
+        let total_size = reader.seek(SeekFrom::End(0))?;
+        reader.seek(SeekFrom::Start(0))?;
+
+        Ok(Self {
+            reader,
+            buf: vec![0u8; BUF_SIZE],
+            buf_len: 0,
+            buf_offset: 0,
+            stream_pos: 0,
+            total_size,
+            done: false,
+        })
+    }
+
+    fn fill_buffer(&mut self) -> Result<bool> {
+        if self.stream_pos >= self.total_size {
+            self.done = true;
+            return Ok(false);
+        }
+
+        // Move unconsumed data to front
+        if self.buf_offset > 0 && self.buf_offset < self.buf_len {
+            let remaining = self.buf_len - self.buf_offset;
+            self.buf.copy_within(self.buf_offset..self.buf_len, 0);
+            self.buf_len = remaining;
+        } else {
+            self.buf_len = 0;
+        }
+        self.buf_offset = 0;
+
+        // Read more data
+        let space = BUF_SIZE - self.buf_len;
+        if space > 0 {
+            let Some(dst) = self.buf.get_mut(self.buf_len..self.buf_len + space) else {
+                self.done = true;
+                return Ok(self.buf_len > 0);
+            };
+            let n = self.reader.read(dst)?;
+            if n == 0 {
+                self.done = true;
+                return Ok(self.buf_len > 0);
+            }
+            self.buf_len += n;
+            self.stream_pos += n as u64;
+        }
+
+        Ok(true)
+    }
+
+    fn skip_zeros(&mut self) -> Result<bool> {
+        loop {
+            while self.buf_offset + 8 <= self.buf_len {
+                match self.buf.get(self.buf_offset..self.buf_offset + 8) {
+                    Some([0, 0, 0, 0, 0, 0, 0, 0]) => self.buf_offset += 8,
+                    _ => return Ok(true),
+                }
+            }
+            if !self.fill_buffer()? {
+                return Ok(false);
+            }
+            if self.buf_len == 0 {
+                return Ok(false);
+            }
+        }
+    }
+}
+
+impl<R: Read + Seek> Iterator for UsnJournalReader<R> {
+    type Item = Result<UsnRecord>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.done {
+            return None;
+        }
+
+        // Ensure we have data
+        if self.buf_offset >= self.buf_len {
+            match self.fill_buffer() {
+                Ok(true) => {}
+                Ok(false) => return None,
+                Err(e) => return Some(Err(e)),
+            }
+        }
+
+        // Skip zero-filled regions
+        match self.skip_zeros() {
+            Ok(true) => {}
+            Ok(false) => return None,
+            Err(e) => return Some(Err(e)),
+        }
+
+        // Need at least 8 bytes for record length + version
+        if self.buf_offset + 8 > self.buf_len {
+            match self.fill_buffer() {
+                Ok(true) if self.buf_offset + 8 <= self.buf_len => {}
+                _ => return None,
+            }
+        }
+
+        let record_len = read_u32_le(&self.buf, self.buf_offset) as usize;
+
+        if !(8..=65536).contains(&record_len) {
+            self.buf_offset += 8;
+            return self.next();
+        }
+
+        // Ensure we have the full record in buffer
+        if self.buf_offset + record_len > self.buf_len {
+            match self.fill_buffer() {
+                Ok(true) if self.buf_offset + record_len <= self.buf_len => {}
+                _ => {
+                    self.buf_offset += 8;
+                    return self.next();
+                }
+            }
+        }
+
+        let version = read_u16_le(&self.buf, self.buf_offset + 4);
+
+        let Some(record_data) = self.buf.get(self.buf_offset..self.buf_offset + record_len) else {
+            self.buf_offset += 8;
+            return self.next();
+        };
+        let record_data = record_data.to_vec();
+        let aligned = (record_len + 7) & !7;
+        self.buf_offset += aligned;
+
+        match version {
+            2 => match parse_usn_record_v2(&record_data) {
+                Ok(r) => Some(Ok(r)),
+                Err(_) => self.next(),
+            },
+            3 => match parse_usn_record_v3(&record_data) {
+                Ok(r) => Some(Ok(r)),
+                Err(_) => self.next(),
+            },
+            _ => self.next(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::usn::UsnReason;
-    use std::io::{Read, Seek, SeekFrom};
     use std::io::Cursor;
 
     fn build_v2_record_bytes(
