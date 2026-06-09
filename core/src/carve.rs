@@ -148,9 +148,11 @@ fn try_carve_entry(
         }
 
         // Only resident $FILE_NAME attributes carry an extractable name. The loop
-        // guard keeps `attr_offset + 8` within the entry, so the non-resident-flag
-        // read is in bounds.
-        let is_resident_filename = attr_type == ATTR_FILE_NAME && entry[attr_offset + 8] == 0;
+        // guard permits `attr_offset` up to `MFT_ENTRY_SIZE - 8`, so the
+        // non-resident-flag byte at `attr_offset + 8` can be one past the end —
+        // read it bounds-checked (a truncated attribute is never a resident name).
+        let is_resident_filename =
+            attr_type == ATTR_FILE_NAME && entry.get(attr_offset + 8) == Some(&0);
         if let Some((name, parent_e, parent_s, ns)) = is_resident_filename
             .then(|| parse_filename_attr(entry, attr_offset))
             .flatten()
