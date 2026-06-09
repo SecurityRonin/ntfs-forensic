@@ -7,6 +7,7 @@
 //! the analyzer/application layers built on top of this.
 
 mod attributes;
+pub mod carver;
 mod reason;
 mod reader;
 mod record;
