@@ -4,14 +4,20 @@ version = "0.0.0"
 publish = false
 edition = "2021"
 
+# Standalone workspace: the fuzz crate must not be pulled into the parent
+# (core/forensic) workspace, whose virtual root manifest is not a package.
+[workspace]
+
 [package.metadata]
 cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
 
-[dependencies.ntfs-forensic]
-path = ".."
+# The fuzzed structures (boot record, MFT record, attributes, runlist, index
+# buffer, LZNT1) are the reader's — they live in ntfs-core.
+[dependencies.ntfs-core]
+path = "../core"
 
 [[bin]]
 name = "boot"

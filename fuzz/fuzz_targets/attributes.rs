@@ -8,5 +8,5 @@ fuzz_target!(|data: &[u8]| {
         Some((o, r)) => (*o as usize, r),
         None => return,
     };
-    let _ = ntfs_forensic::parse_attributes(rec, off);
+    let _ = ntfs_core::parse_attributes(rec, off);
 });

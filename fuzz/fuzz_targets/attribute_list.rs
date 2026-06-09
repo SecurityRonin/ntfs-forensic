@@ -3,5 +3,5 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|data: &[u8]| {
-    let _ = ntfs_forensic::parse_attribute_list(data);
+    let _ = ntfs_core::parse_attribute_list(data);
 });
