@@ -58,7 +58,7 @@ for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
 - `carve_usn_records` — recover USN records from free space and corrupt journals (V2/V3, timestamp-range gated).
 - `RefsAnalyzer` / `RefsFileId` — ReFS USN V3 support (128-bit file IDs, journal-rewind-only path reconstruction).
 
-> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by **CyberCX** — [*NTFS Usnjrnl Rewind*](https://cybercx.com/blog/ntfs-usnjrnl-rewind/) (April 2024) · [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind). `RewindEngine` is an independent, clean-room Rust implementation.
+> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by [**CyberCX**](https://cybercx.com/) — [*NTFS Usnjrnl Rewind*](https://cybercx.com/blog/ntfs-usnjrnl-rewind/) (April 2024) · [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind). `RewindEngine` is an independent, clean-room Rust implementation.
 
 ## Trust, but verify
 

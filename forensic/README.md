@@ -63,7 +63,7 @@ Beyond MFT-record anomalies, this crate analyses the USN change journal (decoded
 - `correlation` — cross-references USN ↔ `$LogFile` ↔ `$MFT` to surface ghost records, coverage gaps, entry reuse, and timestamp conflicts.
 - `triage` — a `TriageEngine` with 12 built-in investigative questions over reconstructed records.
 
-The "reconstructed records" these analyse come from `ntfs-core`'s `RewindEngine`, which rebuilds the full path of every journal event — even for deleted, MFT-reused files — via the *Rewind* algorithm pioneered by **CyberCX** ([*NTFS Usnjrnl Rewind*](https://cybercx.com/blog/ntfs-usnjrnl-rewind/) · [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind)).
+The "reconstructed records" these analyse come from `ntfs-core`'s `RewindEngine`, which rebuilds the full path of every journal event — even for deleted, MFT-reused files — via the *Rewind* algorithm pioneered by [**CyberCX**](https://cybercx.com/) ([*NTFS Usnjrnl Rewind*](https://cybercx.com/blog/ntfs-usnjrnl-rewind/) · [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind)).
 
 These power the thin [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) CLI, which adds output formats (JSON / CSV / SQLite / TLN / body) and live monitoring on top.
 
