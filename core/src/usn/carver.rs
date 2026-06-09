@@ -4,6 +4,253 @@
 //! signatures, validates each candidate, and extracts valid records.
 //! Handles overlapping and corrupt regions gracefully.
 
+use crate::usn::{parse_usn_record_v2, parse_usn_record_v3, UsnRecord};
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+/// Minimum valid `USN_RECORD_V2` size.
+const USN_V2_MIN_SIZE: usize = 0x3C;
+
+/// Minimum valid `USN_RECORD_V3` size.
+const USN_V3_MIN_SIZE: usize = 0x4C;
+
+/// Maximum valid record size.
+const USN_MAX_RECORD_SIZE: usize = 65536;
+
+/// Earliest valid timestamp: 2000-01-01T00:00:00 UTC as Windows `FILETIME`.
+const FILETIME_2000: i64 = 125_911_584_000_000_000;
+
+/// Latest valid timestamp: 2030-01-01T00:00:00 UTC as Windows `FILETIME`.
+const FILETIME_2030: i64 = 135_379_776_000_000_000;
+
+// ─── Result types ────────────────────────────────────────────────────────────
+
+/// A carved USN record with its offset in the source data.
+#[derive(Debug, Clone)]
+pub struct CarvedRecord {
+    /// Offset in the source data where this record was found.
+    pub offset: usize,
+    /// The parsed USN record.
+    pub record: UsnRecord,
+}
+
+/// Statistics from a carving operation.
+#[derive(Debug, Clone, Default)]
+pub struct CarvingStats {
+    /// Total bytes scanned.
+    pub bytes_scanned: usize,
+    /// Number of candidate positions examined.
+    pub candidates_examined: u64,
+    /// Number of records successfully carved.
+    pub records_carved: usize,
+    /// Number of candidates rejected due to invalid timestamps.
+    pub rejected_timestamp: u64,
+    /// Number of candidates rejected due to invalid structure.
+    pub rejected_structure: u64,
+}
+
+// ─── Carver ──────────────────────────────────────────────────────────────────
+
+/// Carve USN records from raw binary data (unallocated space, disk images, etc.).
+///
+/// Scans the data byte-by-byte (aligned to 8-byte boundaries for efficiency)
+/// looking for valid `USN_RECORD_V2`/V3 signatures and validates each candidate.
+///
+/// # Arguments
+/// * `data` - Raw binary data to scan
+///
+/// # Returns
+/// A tuple of (carved records, carving statistics).
+pub fn carve_usn_records(data: &[u8]) -> (Vec<CarvedRecord>, CarvingStats) {
+    let mut results = Vec::new();
+    let mut stats = CarvingStats {
+        bytes_scanned: data.len(),
+        ..Default::default()
+    };
+
+    let len = data.len();
+    let mut offset = 0;
+
+    // Scan on 8-byte aligned boundaries (USN records are always 8-byte aligned)
+    while offset + 8 <= len {
+        // Quick check: skip zero-filled regions
+        if data.get(offset..offset + 4) == Some(&[0, 0, 0, 0][..]) {
+            offset += 8;
+            continue;
+        }
+
+        let record_len = read_u32_le(data, offset) as usize;
+        let major_version = read_u16_le(data, offset + 4);
+
+        // Check if this could be a valid USN record
+        match major_version {
+            2 if (USN_V2_MIN_SIZE..=USN_MAX_RECORD_SIZE).contains(&record_len)
+                && offset + record_len <= len =>
+            {
+                stats.candidates_examined += 1;
+                if let Some(carved) = try_carve_v2(data, offset, record_len, &mut stats) {
+                    // Skip past this record to avoid overlapping matches
+                    let aligned = (record_len + 7) & !7;
+                    offset += aligned;
+                    results.push(carved);
+                    continue;
+                }
+            }
+            3 if (USN_V3_MIN_SIZE..=USN_MAX_RECORD_SIZE).contains(&record_len)
+                && offset + record_len <= len =>
+            {
+                stats.candidates_examined += 1;
+                if let Some(carved) = try_carve_v3(data, offset, record_len, &mut stats) {
+                    let aligned = (record_len + 7) & !7;
+                    offset += aligned;
+                    results.push(carved);
+                    continue;
+                }
+            }
+            _ => {}
+        }
+
+        offset += 8;
+    }
+
+    stats.records_carved = results.len();
+    (results, stats)
+}
+
+/// Attempt to carve a V2 record at the given offset.
+fn try_carve_v2(
+    data: &[u8],
+    offset: usize,
+    record_len: usize,
+    stats: &mut CarvingStats,
+) -> Option<CarvedRecord> {
+    // Validate record length is large enough before slicing.
+    if record_len < USN_V2_MIN_SIZE {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    let record_data = data.get(offset..offset + record_len)?;
+
+    let filename_length = read_u16_le(record_data, 0x38) as usize;
+    let filename_offset = read_u16_le(record_data, 0x3A) as usize;
+
+    // Filename offset must be at 0x3C for V2
+    if filename_offset != 0x3C {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    // Filename must fit within record
+    if filename_offset + filename_length > record_len {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    // Filename length must be even (UTF-16) and non-zero
+    if filename_length == 0 || filename_length % 2 != 0 {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    // Validate timestamp
+    let timestamp_raw = read_i64_le(record_data, 0x20);
+    if !is_valid_timestamp(timestamp_raw) {
+        stats.rejected_timestamp += 1;
+        return None;
+    }
+
+    // Try to parse the full record
+    if let Ok(record) = parse_usn_record_v2(record_data) {
+        Some(CarvedRecord { offset, record })
+    } else {
+        stats.rejected_structure += 1;
+        None
+    }
+}
+
+/// Attempt to carve a V3 record at the given offset.
+fn try_carve_v3(
+    data: &[u8],
+    offset: usize,
+    record_len: usize,
+    stats: &mut CarvingStats,
+) -> Option<CarvedRecord> {
+    if record_len < USN_V3_MIN_SIZE {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    let record_data = data.get(offset..offset + record_len)?;
+
+    let filename_length = read_u16_le(record_data, 0x48) as usize;
+    let filename_offset = read_u16_le(record_data, 0x4A) as usize;
+
+    // Filename offset must be at 0x4C for V3
+    if filename_offset != 0x4C {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    if filename_offset + filename_length > record_len {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    if filename_length == 0 || filename_length % 2 != 0 {
+        stats.rejected_structure += 1;
+        return None;
+    }
+
+    // Validate timestamp
+    let timestamp_raw = read_i64_le(record_data, 0x30);
+    if !is_valid_timestamp(timestamp_raw) {
+        stats.rejected_timestamp += 1;
+        return None;
+    }
+
+    if let Ok(record) = parse_usn_record_v3(record_data) {
+        Some(CarvedRecord { offset, record })
+    } else {
+        stats.rejected_structure += 1;
+        None
+    }
+}
+
+/// Check if a Windows `FILETIME` value falls within a valid range (2000-2030).
+fn is_valid_timestamp(filetime: i64) -> bool {
+    (FILETIME_2000..=FILETIME_2030).contains(&filetime)
+}
+
+// ─── Binary helpers (bounds-checked, yield 0 on OOB) ─────────────────────────
+
+/// Reads a little-endian `u16` at `offset`, yielding 0 if out of bounds.
+fn read_u16_le(data: &[u8], offset: usize) -> u16 {
+    let mut b = [0u8; 2];
+    if let Some(s) = data.get(offset..offset + 2) {
+        b.copy_from_slice(s);
+    }
+    u16::from_le_bytes(b)
+}
+
+/// Reads a little-endian `u32` at `offset`, yielding 0 if out of bounds.
+fn read_u32_le(data: &[u8], offset: usize) -> u32 {
+    let mut b = [0u8; 4];
+    if let Some(s) = data.get(offset..offset + 4) {
+        b.copy_from_slice(s);
+    }
+    u32::from_le_bytes(b)
+}
+
+/// Reads a little-endian `i64` at `offset`, yielding 0 if out of bounds.
+fn read_i64_le(data: &[u8], offset: usize) -> i64 {
+    let mut b = [0u8; 8];
+    if let Some(s) = data.get(offset..offset + 8) {
+        b.copy_from_slice(s);
+    }
+    i64::from_le_bytes(b)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

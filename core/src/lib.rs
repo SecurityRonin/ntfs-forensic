@@ -72,4 +72,7 @@ pub use runlist::{decode as decode_runlist, Run};
 pub use source::OffsetReader;
 pub use standard_information::StandardInformation;
 pub use time::Filetime;
-pub use usn::{parse_usn_record_v2, FileAttributes, UsnJournalReader, UsnReason, UsnRecord};
+pub use usn::{
+    carve_usn_records, parse_usn_record_v2, CarvedRecord, CarvingStats, FileAttributes,
+    UsnJournalReader, UsnReason, UsnRecord,
+};
