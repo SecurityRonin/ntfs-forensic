@@ -992,4 +992,30 @@ mod tests {
         assert!(e.is_in_use);
         assert_eq!(e.offset, 0);
     }
+
+    #[test]
+    fn carve_filename_attr_at_entry_boundary_does_not_panic() {
+        // Regression: a crafted MFT entry whose attribute walk lands a
+        // `$FILE_NAME` attribute at offset `MFT_ENTRY_SIZE - 8` (1016) made the
+        // loop guard `attr_offset + 8 <= MFT_ENTRY_SIZE` true while the
+        // non-resident-flag read `entry[attr_offset + 8]` indexed `entry[1024]`,
+        // one past the end — an out-of-bounds panic on attacker-controlled input.
+        let mut entry = vec![0u8; MFT_ENTRY_SIZE];
+        entry[0..4].copy_from_slice(&FILE_SIGNATURE);
+        entry[16..18].copy_from_slice(&1u16.to_le_bytes()); // sequence_number != 0
+        entry[20..22].copy_from_slice(&48u16.to_le_bytes()); // first_attr_offset
+        // First attribute at 48: a non-`$FILE_NAME` type, length 968 → next
+        // attribute lands at 48 + 968 = 1016.
+        entry[48..52].copy_from_slice(&0x10u32.to_le_bytes()); // $STANDARD_INFORMATION
+        entry[52..56].copy_from_slice(&968u32.to_le_bytes());
+        // Second attribute at 1016: `$FILE_NAME`, length 8 — passes the
+        // `attr_offset + attr_len <= MFT_ENTRY_SIZE` guard (1016 + 8 == 1024),
+        // then the non-resident-flag read at 1016 + 8 == 1024 must NOT panic.
+        entry[1016..1020].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        entry[1020..1024].copy_from_slice(&8u32.to_le_bytes());
+
+        // Must return without panicking; no valid filename is extractable.
+        let (entries, _) = carve_mft_entries(&entry);
+        assert!(entries.is_empty());
+    }
 }
