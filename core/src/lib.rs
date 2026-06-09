@@ -69,6 +69,7 @@ pub use logfile::{detect_journal_clearing, parse_logfile, LogFileSummary, Restar
 pub use mftmirr::{compare_mft_mirror, MirrorComparison};
 pub use record::{apply_fixup, MftRecordHeader};
 pub use refs::{RefsAnalyzer, RefsFileId, RefsRecord};
+pub use rewind::{EntryInfo, EntryKey, RecordSource, ResolvedRecord, RewindEngine};
 pub use runlist::{decode as decode_runlist, Run};
 pub use source::OffsetReader;
 pub use standard_information::StandardInformation;

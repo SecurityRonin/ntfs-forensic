@@ -1,6 +1,6 @@
 //! Journal Rewind engine for complete path reconstruction.
 //!
-//! Implements the CyberCX "Rewind" algorithm: processes USN journal entries
+//! Implements the `CyberCX` "Rewind" algorithm: processes USN journal entries
 //! in reverse chronological order to reconstruct full paths even when MFT
 //! entries have been reallocated multiple times.
 //!
@@ -18,6 +18,293 @@
 //! 5. Recursively resolve paths through the lookup table
 //!
 //! This guarantees complete path resolution for every journal entry.
+
+use std::collections::HashMap;
+
+use crate::carve::CarvedMftEntry;
+use crate::usn::{UsnReason, UsnRecord};
+
+/// Key for the rewind lookup table: (`mft_entry`, `mft_sequence`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EntryKey {
+    pub entry: u64,
+    pub sequence: u16,
+}
+
+impl EntryKey {
+    pub fn new(entry: u64, sequence: u16) -> Self {
+        Self { entry, sequence }
+    }
+
+    /// The NTFS root directory is always entry 5, sequence 5.
+    pub fn root() -> Self {
+        Self {
+            entry: 5,
+            sequence: 5,
+        }
+    }
+
+    pub fn is_root(&self) -> bool {
+        self.entry == 5
+    }
+}
+
+/// Value stored in the rewind lookup table.
+#[derive(Debug, Clone)]
+pub struct EntryInfo {
+    /// Filename of this entry (not full path).
+    pub name: String,
+    /// Key to the parent directory entry.
+    pub parent: EntryKey,
+}
+
+/// Where a resolved record originated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordSource {
+    /// From the live (allocated) USN journal.
+    Allocated,
+    /// Carved from unallocated disk space.
+    Carved,
+    /// Ghost record inferred from MFT/journal correlation.
+    Ghost,
+}
+
+impl RecordSource {
+    /// Returns the lowercase label used in serialization and source filters.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RecordSource::Allocated => "allocated",
+            RecordSource::Carved => "entry-carved",
+            RecordSource::Ghost => "ghost",
+        }
+    }
+}
+
+/// Result of path resolution for a single USN record.
+#[derive(Debug, Clone)]
+pub struct ResolvedRecord {
+    /// The original USN record.
+    pub record: UsnRecord,
+    /// The fully resolved path (e.g. ".\\Users\\admin\\temp\\malware.exe").
+    pub full_path: String,
+    /// The resolved parent path (e.g. ".\\Users\\admin\\temp").
+    pub parent_path: String,
+    /// Where this record originated (allocated journal, carved, or ghost).
+    pub source: RecordSource,
+}
+
+/// The Rewind engine for full path reconstruction.
+pub struct RewindEngine {
+    /// Lookup table: (entry, sequence) -> (name, `parent_key`).
+    lookup: HashMap<EntryKey, EntryInfo>,
+}
+
+impl RewindEngine {
+    /// Create a new empty `RewindEngine`.
+    pub fn new() -> Self {
+        Self {
+            lookup: HashMap::new(),
+        }
+    }
+
+    /// Create a `RewindEngine` seeded with MFT entries.
+    ///
+    /// The `mft_entries` iterator yields (`entry_number`, sequence, filename,
+    /// `parent_entry`, `parent_sequence`).
+    pub fn from_mft<I>(mft_entries: I) -> Self
+    where
+        I: IntoIterator<Item = (u64, u16, String, u64, u16)>,
+    {
+        let mut engine = Self::new();
+        for (entry, seq, name, parent_entry, parent_seq) in mft_entries {
+            engine.lookup.insert(
+                EntryKey::new(entry, seq),
+                EntryInfo {
+                    name,
+                    parent: EntryKey::new(parent_entry, parent_seq),
+                },
+            );
+        }
+        engine
+    }
+
+    /// Number of entries in the lookup table.
+    pub fn lookup_len(&self) -> usize {
+        self.lookup.len()
+    }
+
+    /// Seed the engine with carved MFT entries from unallocated space.
+    ///
+    /// Uses `or_insert` so carved entries never overwrite allocated MFT data
+    /// that was seeded via `from_mft`. Historical entries (different sequence
+    /// numbers from the same MFT entry) are added as new keys.
+    pub fn seed_from_carved(&mut self, entries: &[CarvedMftEntry]) {
+        for e in entries {
+            let key = EntryKey::new(e.entry_number, e.sequence_number);
+            self.lookup.entry(key).or_insert(EntryInfo {
+                name: e.filename.clone(),
+                parent: EntryKey::new(e.parent_entry, e.parent_sequence),
+            });
+        }
+    }
+
+    /// Insert or update an entry in the lookup table.
+    pub fn insert(&mut self, key: EntryKey, info: EntryInfo) {
+        self.lookup.insert(key, info);
+    }
+
+    /// Resolve the full path for a given entry key.
+    ///
+    /// Recursively follows parent references until reaching the root.
+    /// Returns "." as the root prefix (representing the volume root).
+    pub fn resolve_path(&self, key: &EntryKey) -> String {
+        self.resolve_path_inner(key, 0)
+    }
+
+    fn resolve_path_inner(&self, key: &EntryKey, depth: usize) -> String {
+        // Prevent infinite loops from circular references
+        if depth > 256 {
+            return format!("UNRESOLVED({}:{})", key.entry, key.sequence);
+        }
+
+        if key.is_root() {
+            return ".".to_string();
+        }
+
+        if let Some(info) = self.lookup.get(key) {
+            let parent_path = self.resolve_path_inner(&info.parent, depth + 1);
+            format!("{}\\{}", parent_path, info.name)
+        } else {
+            format!("UNKNOWN({}:{})", key.entry, key.sequence)
+        }
+    }
+
+    /// Process USN records using the Rewind algorithm.
+    ///
+    /// Records MUST be sorted by USN/timestamp in ascending order (oldest first).
+    /// This function processes them in reverse to build the lookup table, then
+    /// resolves paths for each record in forward order.
+    ///
+    /// Returns resolved records with full paths.
+    pub fn rewind(&mut self, records: &[UsnRecord]) -> Vec<ResolvedRecord> {
+        // Phase 1: Process records in reverse to build/update the lookup table.
+        // Going backwards from newest to oldest, we track how entries were
+        // named and where they were parented at each point in time.
+        for record in records.iter().rev() {
+            let key = EntryKey::new(record.mft_entry, record.mft_sequence);
+            let parent_key = EntryKey::new(record.parent_mft_entry, record.parent_mft_sequence);
+
+            // Always record what we learn about this entry's name and parent.
+            // Since we're going backwards, the first time we see an entry-sequence
+            // pair is its LATEST state. We want to capture earlier states too.
+            if record.reason.contains(UsnReason::RENAME_OLD_NAME) {
+                // This is the OLD name before a rename. Going backwards, this means
+                // the entry was renamed FROM this name TO something else.
+                // We want to record this as the name for this entry-sequence pair
+                // at this point in time.
+                self.lookup.insert(
+                    key,
+                    EntryInfo {
+                        name: record.filename.clone(),
+                        parent: parent_key,
+                    },
+                );
+            } else {
+                // First time seeing this entry-sequence going backwards = latest state
+                self.lookup.entry(key).or_insert(EntryInfo {
+                    name: record.filename.clone(),
+                    parent: parent_key,
+                });
+            }
+
+            // If this is a directory, also ensure the parent's chain is known
+            // (the parent entry-sequence -> its name mapping may come from other records)
+        }
+
+        // Phase 2: Resolve paths for each record in forward order.
+        // Now re-process records forward. For each record, we need to resolve
+        // the path as it existed at that point in time.
+        //
+        // We rebuild the lookup as we go forward, updating names on renames
+        // and tracking creates/deletes.
+        let mut forward_lookup = self.lookup.clone();
+        let mut results = Vec::with_capacity(records.len());
+
+        for record in records {
+            let key = EntryKey::new(record.mft_entry, record.mft_sequence);
+            let parent_key = EntryKey::new(record.parent_mft_entry, record.parent_mft_sequence);
+
+            // Update the forward lookup with what this record tells us
+            if record.reason.contains(UsnReason::RENAME_NEW_NAME) {
+                // Entry was renamed to this name
+                forward_lookup.insert(
+                    key,
+                    EntryInfo {
+                        name: record.filename.clone(),
+                        parent: parent_key,
+                    },
+                );
+            } else if record.reason.contains(UsnReason::FILE_CREATE) {
+                // New entry created
+                forward_lookup.insert(
+                    key,
+                    EntryInfo {
+                        name: record.filename.clone(),
+                        parent: parent_key,
+                    },
+                );
+            } else {
+                forward_lookup.entry(key).or_insert(EntryInfo {
+                    name: record.filename.clone(),
+                    parent: parent_key,
+                });
+            }
+
+            // Resolve the parent path using the forward lookup
+            let parent_path = resolve_path_from(&forward_lookup, &parent_key);
+            let full_path = format!("{}\\{}", parent_path, record.filename);
+
+            results.push(ResolvedRecord {
+                record: record.clone(),
+                full_path,
+                parent_path,
+                source: RecordSource::Allocated,
+            });
+        }
+
+        results
+    }
+}
+
+/// Resolve a path from a lookup table (standalone function for forward pass).
+fn resolve_path_from(lookup: &HashMap<EntryKey, EntryInfo>, key: &EntryKey) -> String {
+    resolve_path_from_inner(lookup, key, 0)
+}
+
+fn resolve_path_from_inner(
+    lookup: &HashMap<EntryKey, EntryInfo>,
+    key: &EntryKey,
+    depth: usize,
+) -> String {
+    if depth > 256 {
+        return format!("UNRESOLVED({}:{})", key.entry, key.sequence);
+    }
+    if key.is_root() {
+        return ".".to_string();
+    }
+    if let Some(info) = lookup.get(key) {
+        let parent_path = resolve_path_from_inner(lookup, &info.parent, depth + 1);
+        format!("{}\\{}", parent_path, info.name)
+    } else {
+        format!("UNKNOWN({}:{})", key.entry, key.sequence)
+    }
+}
+
+impl Default for RewindEngine {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
