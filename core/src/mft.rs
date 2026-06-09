@@ -702,7 +702,8 @@ mod tests {
 
         // Total record size (must be multiple of 8)
         let first_attr_offset: u16 = 0x38; // standard for NTFS
-        let bytes_used: u32 = u32::from(first_attr_offset) + si_total_aligned + fn_total_aligned + 8; // +8 for end marker + padding
+        let bytes_used: u32 =
+            u32::from(first_attr_offset) + si_total_aligned + fn_total_aligned + 8; // +8 for end marker + padding
         let alloc_size: u32 = 1024;
         let mut buf = vec![0u8; alloc_size as usize];
 

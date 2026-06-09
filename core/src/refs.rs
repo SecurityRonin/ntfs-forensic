@@ -363,7 +363,10 @@ mod tests {
         );
 
         // The directory itself should be resolvable
-        assert_eq!(paths.get(&docs_id).map(std::string::String::as_str), Some("Documents"));
+        assert_eq!(
+            paths.get(&docs_id).map(std::string::String::as_str),
+            Some("Documents")
+        );
 
         // Root should not appear in reconstructed paths (it's the anchor)
         assert!(!paths.contains_key(&root_id));
@@ -435,7 +438,10 @@ mod tests {
 
         let analyzer = RefsAnalyzer::new(vec![root_record.clone()]);
         let paths = analyzer.reconstruct_paths();
-        assert_eq!(paths.get(&root_id).map(std::string::String::as_str), Some("root_dir"));
+        assert_eq!(
+            paths.get(&root_id).map(std::string::String::as_str),
+            Some("root_dir")
+        );
     }
 
     #[test]
@@ -493,8 +499,14 @@ mod tests {
             paths.get(&id_a).map(std::string::String::as_str),
             Some("topdir\\subdir\\file.txt")
         );
-        assert_eq!(paths.get(&id_b).map(std::string::String::as_str), Some("topdir\\subdir"));
-        assert_eq!(paths.get(&id_c).map(std::string::String::as_str), Some("topdir"));
+        assert_eq!(
+            paths.get(&id_b).map(std::string::String::as_str),
+            Some("topdir\\subdir")
+        );
+        assert_eq!(
+            paths.get(&id_c).map(std::string::String::as_str),
+            Some("topdir")
+        );
     }
 
     #[test]
@@ -558,8 +570,14 @@ mod tests {
         let paths = analyzer.reconstruct_paths();
 
         // A should resolve to dir_b\file_a
-        assert_eq!(paths.get(&id_a).map(std::string::String::as_str), Some("dir_b\\file_a"));
+        assert_eq!(
+            paths.get(&id_a).map(std::string::String::as_str),
+            Some("dir_b\\file_a")
+        );
         // B should resolve to dir_b
-        assert_eq!(paths.get(&id_b).map(std::string::String::as_str), Some("dir_b"));
+        assert_eq!(
+            paths.get(&id_b).map(std::string::String::as_str),
+            Some("dir_b")
+        );
     }
 }

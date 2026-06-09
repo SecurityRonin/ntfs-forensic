@@ -8,8 +8,8 @@
 
 mod attributes;
 pub mod carver;
-mod reason;
 mod reader;
+mod reason;
 mod record;
 
 pub use attributes::FileAttributes;
