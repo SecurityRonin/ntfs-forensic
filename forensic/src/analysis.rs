@@ -1193,10 +1193,11 @@ mod tests {
         )];
 
         let indicators = detect_timestomping(&records);
-        if !indicators.is_empty() {
-            // If detected, confidence should be lower (0.5) because reason is not isolated
-            assert!(indicators[0].confidence <= 0.5);
-        }
+        // A lone BASIC_INFO_CHANGE | CLOSE | SECURITY_CHANGE has no nearby data
+        // change, so it is always flagged; the reason is not isolated (it carries
+        // SECURITY_CHANGE), so confidence is the lower 0.5.
+        assert!(!indicators.is_empty());
+        assert!(indicators[0].confidence <= 0.5);
     }
 
     #[test]
@@ -1385,6 +1386,83 @@ mod tests {
         let indicators = detect_timestomping(&records);
         // The DATA_OVERWRITE is within 60 seconds and after the BASIC_INFO_CHANGE,
         // so it should NOT be flagged as timestomping.
+        assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn test_known_ext_rename_without_matching_extension() {
+        // detect_known_ransomware_extensions: a RENAME_NEW_NAME whose filename
+        // ends with NONE of the known ransomware extensions exercises the path
+        // where the inner `for ext` loop completes without `break`, letting
+        // control fall through the end of the `if reason.contains(..)` block.
+        let records = vec![
+            make_record(100, "renamed.docx", UsnReason::RENAME_NEW_NAME, ts(0), 1000),
+            make_record(101, "moved.pdf", UsnReason::RENAME_NEW_NAME, ts(1), 1100),
+            make_record(102, "data.bin", UsnReason::RENAME_NEW_NAME, ts(2), 1200),
+            // A non-rename record so the per-record `if reason.contains(RENAME_NEW_NAME)`
+            // guard is skipped (its false arm), and a rename whose name matches no
+            // ransomware extension so the inner `for ext` loop completes without break.
+            make_record(103, "plain.txt", UsnReason::FILE_CREATE, ts(3), 1300),
+        ];
+
+        let indicators = detect_known_ransomware_extensions(&records);
+        assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn test_known_ext_group_below_threshold_skips() {
+        // detect_known_ransomware_extensions: an extension group with fewer than
+        // 3 members fails `group.len() >= 3` and falls through the `if` body,
+        // reaching the loop-iteration tail of the per-extension loop.
+        let records = vec![
+            make_record(100, "a.locked", UsnReason::RENAME_NEW_NAME, ts(0), 1000),
+            make_record(101, "b.locked", UsnReason::RENAME_NEW_NAME, ts(1), 1100),
+        ];
+
+        let indicators = detect_known_ransomware_extensions(&records);
+        // Only 2 .locked renames — below the 3-member threshold.
+        assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn test_mass_rename_group_below_threshold_skips() {
+        // detect_mass_rename_patterns: with 20+ total renames (passes the early
+        // guard) but each unusual extension group having fewer than 20 members,
+        // every group fails `group.len() >= 20` and falls through the `if` body.
+        let mut records = Vec::new();
+        for i in 0..25u64 {
+            // Alternate between two distinct unusual extensions so neither group
+            // reaches 20, while the overall rename count exceeds the 20 guard.
+            let ext = if i % 2 == 0 { "aaa" } else { "bbb" };
+            records.push(make_record(
+                100 + i,
+                &format!("file{i}.{ext}"),
+                UsnReason::RENAME_NEW_NAME,
+                ts(i as i64),
+                1000 + (i as i64) * 100,
+            ));
+        }
+
+        let indicators = detect_mass_rename_patterns(&records);
+        // No single unusual-extension group reaches 20 members.
+        assert!(indicators.is_empty());
+    }
+
+    #[test]
+    fn test_timestomp_with_close_falls_through_when_empty() {
+        // Companion to test_timestomp_basic_info_change_with_close: drive
+        // detect_timestomping to an EMPTY result so the `if !indicators.is_empty()`
+        // guard there evaluates false and falls through its closing brace.
+        // A lone DATA_OVERWRITE (no BASIC_INFO_CHANGE) yields no indicators.
+        let records = vec![make_record(
+            100,
+            "plain.bin",
+            UsnReason::DATA_OVERWRITE,
+            ts(1000),
+            5000,
+        )];
+
+        let indicators = detect_timestomping(&records);
         assert!(indicators.is_empty());
     }
 }
