@@ -68,18 +68,36 @@ jobs:
       # The library's I/O is generic over the reader, so each error closure is
       # monomorphized per reader type — making cargo-llvm-cov's region/function
       # metrics structurally < 100%. The meaningful, monomorphization-robust
-      # invariant is that every executable source line is hit at least once;
-      # this gate fails if lcov records any zero-hit line.
+      # invariant is that every executable source line is hit at least once.
+      #
+      # Exception — panic-free defence in depth: a line carrying a
+      # `// cov:unreachable` marker is a defensive guard (a `let-else { continue }`,
+      # a bounds-checked `.get()` fallback, etc.) that is provably unreachable
+      # under a dominating invariant, kept deliberately to stay panic-free if that
+      # invariant is ever broken by a future change. Such lines cannot be exercised
+      # by any test and are exempt. The gate fails on any OTHER zero-hit line.
       - name: Generate lcov
         run: cargo llvm-cov --lib --lcov --output-path lcov.info
-      - name: Enforce 100% line coverage
+      - name: Enforce line coverage (unreachable defensive arms must carry // cov:unreachable)
+        shell: bash
         run: |
-          if grep -qE '^DA:[0-9]+,0$' lcov.info; then
-            echo "::error::Uncovered lines found:"
-            awk -F: '/^SF:/{f=$2} /^DA:[0-9]+,0$/{split($2,a,","); print f":"a[1]}' lcov.info
-            exit 1
-          fi
-          echo "All executable lines covered."
+          fail=0
+          while IFS= read -r line; do
+            if [[ "$line" == SF:* ]]; then
+              f="${line#SF:}"
+            elif [[ "$line" =~ ^DA:([0-9]+),0$ ]]; then
+              n="${BASH_REMATCH[1]}"
+              src="$(sed -n "${n}p" "$f")"
+              if [[ "$src" == *cov:unreachable* ]]; then
+                echo "exempt (// cov:unreachable): $f:$n"
+              else
+                echo "::error::Uncovered line $f:$n:$src"
+                fail=1
+              fi
+            fi
+          done < lcov.info
+          if [[ "$fail" -ne 0 ]]; then exit 1; fi
+          echo "All executable lines covered, or annotated // cov:unreachable."
 
   deny:
     name: cargo-deny

@@ -111,10 +111,10 @@ fn detect_sdelete_patterns(records: &[UsnRecord]) -> Vec<SecureDeletionIndicator
     for group in groups {
         let filenames: Vec<String> = group.iter().map(|r| r.filename.clone()).collect();
         let Some(time_start) = group.first().map(|r| r.timestamp) else {
-            continue;
+            continue; // cov:unreachable: group is non-empty (only groups with len>=3 are built), so first() is always Some
         };
         let Some(time_end) = group.last().map(|r| r.timestamp) else {
-            continue;
+            continue; // cov:unreachable: group is non-empty (only groups with len>=3 are built), so last() is always Some
         };
 
         // Higher confidence if we see both creates and deletes
@@ -146,7 +146,7 @@ fn is_sdelete_filename(name: &str) -> bool {
         return false;
     }
     let Some(first) = base.chars().next() else {
-        return false;
+        return false; // cov:unreachable: base has >=3 bytes (checked above), so chars().next() is always Some
     };
     // SDelete uses repeating single characters: AAA, ZZZ, 000
     base.chars().all(|c| c == first) && (first.is_ascii_uppercase() || first.is_ascii_digit())
@@ -193,10 +193,10 @@ fn detect_bulk_temp_deletion(records: &[UsnRecord]) -> Vec<SecureDeletionIndicat
 
     for group in groups {
         let Some(time_start) = group.first().map(|r| r.timestamp) else {
-            continue;
+            continue; // cov:unreachable: group is non-empty (only groups with len>=10 are built), so first() is always Some
         };
         let Some(time_end) = group.last().map(|r| r.timestamp) else {
-            continue;
+            continue; // cov:unreachable: group is non-empty (only groups with len>=10 are built), so last() is always Some
         };
         indicators.push(SecureDeletionIndicator {
             pattern: SecureDeletionPattern::BulkTempDeletion,
@@ -397,10 +397,10 @@ fn detect_known_ransomware_extensions(records: &[UsnRecord]) -> Vec<RansomwareIn
     for (ext, group) in &extension_groups {
         if group.len() >= 3 {
             let Some(time_start) = group.iter().map(|r| r.timestamp).min() else {
-                continue;
+                continue; // cov:unreachable: the enclosing len()>=3 check guarantees a non-empty iterator, so min() is always Some
             };
             let Some(time_end) = group.iter().map(|r| r.timestamp).max() else {
-                continue;
+                continue; // cov:unreachable: the enclosing len()>=3 check guarantees a non-empty iterator, so max() is always Some
             };
             let sample: Vec<String> = group.iter().take(10).map(|r| r.filename.clone()).collect();
 
@@ -462,10 +462,10 @@ fn detect_mass_rename_patterns(records: &[UsnRecord]) -> Vec<RansomwareIndicator
     for (ext, group) in &ext_groups {
         if group.len() >= 20 {
             let Some(time_start) = group.iter().map(|r| r.timestamp).min() else {
-                continue;
+                continue; // cov:unreachable: the enclosing len()>=20 check guarantees a non-empty iterator, so min() is always Some
             };
             let Some(time_end) = group.iter().map(|r| r.timestamp).max() else {
-                continue;
+                continue; // cov:unreachable: the enclosing len()>=20 check guarantees a non-empty iterator, so max() is always Some
             };
             let duration = time_end - time_start;
 
