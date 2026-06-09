@@ -1,10 +1,623 @@
 //! Anti-forensics and threat detection from USN Journal records.
 //!
 //! Provides heuristic detectors for:
-//! - Secure deletion tool artifacts (SDelete, CCleaner, cipher /w)
+//! - Secure deletion tool artifacts (`SDelete`, `CCleaner`, cipher /w)
 //! - USN journal clearing / tampering
 //! - Ransomware-like mass rename/encrypt patterns
 //! - Timestamp manipulation (timestomping)
+
+use std::collections::HashMap;
+
+use chrono::{DateTime, Duration, Utc};
+
+use ntfs_core::usn::{UsnReason, UsnRecord};
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Secure Deletion Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Indicator of secure deletion tool usage.
+#[derive(Debug, Clone)]
+pub struct SecureDeletionIndicator {
+    /// The type of secure deletion pattern detected.
+    pub pattern: SecureDeletionPattern,
+    /// Filenames involved in the pattern.
+    pub filenames: Vec<String>,
+    /// Time window during which the pattern was observed.
+    pub time_start: DateTime<Utc>,
+    /// End of the time window during which the pattern was observed.
+    pub time_end: DateTime<Utc>,
+    /// Confidence score (0.0 - 1.0).
+    pub confidence: f64,
+}
+
+/// Known secure deletion tool patterns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecureDeletionPattern {
+    /// `SDelete` creates files named with repeating chars (AAA, ZZZ, 000) then deletes them.
+    SDelete,
+    /// `CCleaner` and similar tools create/delete many .tmp files rapidly.
+    BulkTempDeletion,
+    /// `cipher /w` creates large files to overwrite free space.
+    CipherWipe,
+}
+
+/// Detect patterns indicative of secure deletion tools.
+///
+/// Looks for:
+/// - Rapid create-delete cycles for files named with `SDelete` patterns (AAA, ZZZ, 000)
+/// - Bulk .tmp file deletion in Temp folders
+#[must_use]
+pub fn detect_secure_deletion(records: &[UsnRecord]) -> Vec<SecureDeletionIndicator> {
+    let mut indicators = Vec::new();
+
+    // ── SDelete detection ────────────────────────────────────────────────
+    // SDelete renames files to sequences of repeating characters before deletion.
+    // Look for create+delete of files matching patterns like AAAAAA, ZZZZZZ, 000000.
+
+    let sdelete_patterns = detect_sdelete_patterns(records);
+    indicators.extend(sdelete_patterns);
+
+    // ── Bulk temp file deletion ──────────────────────────────────────────
+    let temp_indicators = detect_bulk_temp_deletion(records);
+    indicators.extend(temp_indicators);
+
+    indicators
+}
+
+/// Detect `SDelete`-style repeating character filename patterns.
+fn detect_sdelete_patterns(records: &[UsnRecord]) -> Vec<SecureDeletionIndicator> {
+    let mut indicators = Vec::new();
+
+    // Collect files matching SDelete naming patterns with create or delete events
+    let mut sdelete_events: Vec<&UsnRecord> = Vec::new();
+
+    for record in records {
+        if is_sdelete_filename(&record.filename)
+            && (record.reason.contains(UsnReason::FILE_CREATE)
+                || record.reason.contains(UsnReason::FILE_DELETE))
+        {
+            sdelete_events.push(record);
+        }
+    }
+
+    if sdelete_events.len() < 3 {
+        return indicators;
+    }
+
+    // Group by time windows (within 60 seconds)
+    let mut groups: Vec<Vec<&UsnRecord>> = Vec::new();
+    let mut current_group: Vec<&UsnRecord> = vec![sdelete_events[0]];
+
+    for event in &sdelete_events[1..] {
+        let within_window = current_group
+            .last()
+            .is_some_and(|last| event.timestamp - last.timestamp <= Duration::seconds(60));
+        if within_window {
+            current_group.push(event);
+        } else {
+            if current_group.len() >= 3 {
+                groups.push(std::mem::take(&mut current_group));
+            } else {
+                current_group.clear();
+            }
+            current_group.push(event);
+        }
+    }
+    if current_group.len() >= 3 {
+        groups.push(current_group);
+    }
+
+    for group in groups {
+        let filenames: Vec<String> = group.iter().map(|r| r.filename.clone()).collect();
+        let Some(time_start) = group.first().map(|r| r.timestamp) else {
+            continue;
+        };
+        let Some(time_end) = group.last().map(|r| r.timestamp) else {
+            continue;
+        };
+
+        // Higher confidence if we see both creates and deletes
+        let has_creates = group
+            .iter()
+            .any(|r| r.reason.contains(UsnReason::FILE_CREATE));
+        let has_deletes = group
+            .iter()
+            .any(|r| r.reason.contains(UsnReason::FILE_DELETE));
+        let confidence = if has_creates && has_deletes { 0.9 } else { 0.6 };
+
+        indicators.push(SecureDeletionIndicator {
+            pattern: SecureDeletionPattern::SDelete,
+            filenames,
+            time_start,
+            time_end,
+            confidence,
+        });
+    }
+
+    indicators
+}
+
+/// Check if a filename matches `SDelete`'s repeating character pattern.
+fn is_sdelete_filename(name: &str) -> bool {
+    // Strip extension if present
+    let base = name.split('.').next().unwrap_or(name);
+    if base.len() < 3 {
+        return false;
+    }
+    let Some(first) = base.chars().next() else {
+        return false;
+    };
+    // SDelete uses repeating single characters: AAA, ZZZ, 000
+    base.chars().all(|c| c == first) && (first.is_ascii_uppercase() || first.is_ascii_digit())
+}
+
+/// Detect bulk .tmp file deletion indicative of cleaning tools.
+fn detect_bulk_temp_deletion(records: &[UsnRecord]) -> Vec<SecureDeletionIndicator> {
+    let mut indicators = Vec::new();
+
+    // Find delete events for .tmp files
+    let tmp_deletes: Vec<&UsnRecord> = records
+        .iter()
+        .filter(|r| {
+            r.reason.contains(UsnReason::FILE_DELETE) && r.filename.to_lowercase().ends_with(".tmp")
+        })
+        .collect();
+
+    if tmp_deletes.len() < 10 {
+        return indicators;
+    }
+
+    // Group by 30-second windows
+    let mut groups: Vec<Vec<&UsnRecord>> = Vec::new();
+    let mut current_group: Vec<&UsnRecord> = vec![tmp_deletes[0]];
+
+    for event in &tmp_deletes[1..] {
+        let within_window = current_group
+            .last()
+            .is_some_and(|last| event.timestamp - last.timestamp <= Duration::seconds(30));
+        if within_window {
+            current_group.push(event);
+        } else {
+            if current_group.len() >= 10 {
+                groups.push(std::mem::take(&mut current_group));
+            } else {
+                current_group.clear();
+            }
+            current_group.push(event);
+        }
+    }
+    if current_group.len() >= 10 {
+        groups.push(current_group);
+    }
+
+    for group in groups {
+        let Some(time_start) = group.first().map(|r| r.timestamp) else {
+            continue;
+        };
+        let Some(time_end) = group.last().map(|r| r.timestamp) else {
+            continue;
+        };
+        indicators.push(SecureDeletionIndicator {
+            pattern: SecureDeletionPattern::BulkTempDeletion,
+            filenames: group.iter().map(|r| r.filename.clone()).collect(),
+            time_start,
+            time_end,
+            confidence: 0.7,
+        });
+    }
+
+    indicators
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Journal Clearing Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Result of journal clearing analysis.
+#[derive(Debug, Clone)]
+pub struct JournalClearingResult {
+    /// Whether journal clearing was detected.
+    pub clearing_detected: bool,
+    /// The first USN value seen (high values suggest prior clearing).
+    pub first_usn: Option<i64>,
+    /// Timestamp gaps detected (sudden jumps in time).
+    pub timestamp_gaps: Vec<TimestampGap>,
+    /// Overall confidence (0.0 - 1.0).
+    pub confidence: f64,
+}
+
+/// A detected gap in the journal timeline.
+#[derive(Debug, Clone)]
+pub struct TimestampGap {
+    /// Timestamp before the gap.
+    pub before: DateTime<Utc>,
+    /// Timestamp after the gap.
+    pub after: DateTime<Utc>,
+    /// Duration of the gap.
+    pub gap_duration: Duration,
+    /// USN value before the gap.
+    pub usn_before: i64,
+    /// USN value after the gap.
+    pub usn_after: i64,
+}
+
+/// Detect if the USN journal was cleared or tampered with.
+///
+/// Indicators:
+/// - First record's USN is very high (older records were removed)
+/// - Sudden large timestamp jumps between consecutive records
+#[must_use]
+pub fn detect_journal_clearing(records: &[UsnRecord]) -> JournalClearingResult {
+    let Some(first) = records.first() else {
+        return JournalClearingResult {
+            clearing_detected: false,
+            first_usn: None,
+            timestamp_gaps: Vec::new(),
+            confidence: 0.0,
+        };
+    };
+
+    let first_usn = first.usn;
+    let mut confidence = 0.0;
+
+    // A high first USN suggests the journal has been in use but older entries were cleared.
+    // Typical threshold: if first USN > 1GB of journal data, it's suspicious.
+    const USN_CLEARING_THRESHOLD: i64 = 1_073_741_824; // 1 GiB
+    let high_usn = first_usn > USN_CLEARING_THRESHOLD;
+    if high_usn {
+        confidence += 0.5;
+    }
+
+    // Detect timestamp gaps (jumps of > 24 hours between consecutive records)
+    let mut timestamp_gaps = Vec::new();
+    let gap_threshold = Duration::hours(24);
+
+    for window in records.windows(2) {
+        let gap = window[1].timestamp - window[0].timestamp;
+        if gap > gap_threshold {
+            timestamp_gaps.push(TimestampGap {
+                before: window[0].timestamp,
+                after: window[1].timestamp,
+                gap_duration: gap,
+                usn_before: window[0].usn,
+                usn_after: window[1].usn,
+            });
+        }
+    }
+
+    if !timestamp_gaps.is_empty() {
+        // More gaps = higher confidence
+        let gap_factor = (timestamp_gaps.len() as f64 * 0.2).min(0.5);
+        confidence += gap_factor;
+    }
+
+    let clearing_detected = confidence >= 0.4;
+
+    JournalClearingResult {
+        clearing_detected,
+        first_usn: Some(first_usn),
+        timestamp_gaps,
+        confidence,
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Ransomware Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Indicator of ransomware-like activity.
+#[derive(Debug, Clone)]
+pub struct RansomwareIndicator {
+    /// The suspicious extension being added to files.
+    pub extension: String,
+    /// Number of files affected.
+    pub affected_count: usize,
+    /// Sample filenames that were renamed.
+    pub sample_filenames: Vec<String>,
+    /// Time window of the activity.
+    pub time_start: DateTime<Utc>,
+    /// End of the time window of the activity.
+    pub time_end: DateTime<Utc>,
+    /// Confidence score (0.0 - 1.0).
+    pub confidence: f64,
+}
+
+/// Known ransomware extensions to check for.
+const RANSOMWARE_EXTENSIONS: &[&str] = &[
+    ".encrypted",
+    ".locked",
+    ".crypto",
+    ".crypt",
+    ".enc",
+    ".locky",
+    ".cerber",
+    ".zepto",
+    ".odin",
+    ".thor",
+    ".aesir",
+    ".zzzzz",
+    ".micro",
+    ".crypted",
+    ".crinf",
+    ".r5a",
+    ".xrtn",
+    ".xtbl",
+    ".crypz",
+    ".cryp1",
+    ".ransom",
+    ".wallet",
+    ".onion",
+    ".wncry",
+    ".wcry",
+    ".wncryt",
+];
+
+/// Detect ransomware-like behavior patterns in USN records.
+///
+/// Looks for:
+/// - Mass file renames with known ransomware extensions
+/// - High rate of `DATA_OVERWRITE` followed by `RENAME_NEW_NAME`
+/// - Many files getting the same new extension in a short time window
+#[must_use]
+pub fn detect_ransomware_patterns(records: &[UsnRecord]) -> Vec<RansomwareIndicator> {
+    let mut indicators = Vec::new();
+
+    // ── Known extension detection ────────────────────────────────────────
+    indicators.extend(detect_known_ransomware_extensions(records));
+
+    // ── Mass rename with same new extension ──────────────────────────────
+    indicators.extend(detect_mass_rename_patterns(records));
+
+    indicators
+}
+
+/// Detect files being renamed to known ransomware extensions.
+fn detect_known_ransomware_extensions(records: &[UsnRecord]) -> Vec<RansomwareIndicator> {
+    let mut indicators = Vec::new();
+
+    // Group renames by extension
+    let mut extension_groups: HashMap<String, Vec<&UsnRecord>> = HashMap::new();
+
+    for record in records {
+        if record.reason.contains(UsnReason::RENAME_NEW_NAME) {
+            let lower = record.filename.to_lowercase();
+            for ext in RANSOMWARE_EXTENSIONS {
+                if lower.ends_with(ext) {
+                    extension_groups
+                        .entry((*ext).to_string())
+                        .or_default()
+                        .push(record);
+                    break;
+                }
+            }
+        }
+    }
+
+    for (ext, group) in &extension_groups {
+        if group.len() >= 3 {
+            let Some(time_start) = group.iter().map(|r| r.timestamp).min() else {
+                continue;
+            };
+            let Some(time_end) = group.iter().map(|r| r.timestamp).max() else {
+                continue;
+            };
+            let sample: Vec<String> = group.iter().take(10).map(|r| r.filename.clone()).collect();
+
+            let confidence = if group.len() >= 20 {
+                0.95
+            } else if group.len() >= 10 {
+                0.85
+            } else {
+                0.6
+            };
+
+            indicators.push(RansomwareIndicator {
+                extension: ext.clone(),
+                affected_count: group.len(),
+                sample_filenames: sample,
+                time_start,
+                time_end,
+                confidence,
+            });
+        }
+    }
+
+    indicators
+}
+
+/// Detect mass rename patterns where many files get the same new extension.
+fn detect_mass_rename_patterns(records: &[UsnRecord]) -> Vec<RansomwareIndicator> {
+    let mut indicators = Vec::new();
+
+    // Find DATA_OVERWRITE followed by RENAME_NEW_NAME patterns
+    // Group renames by new extension in 5-minute windows
+    let rename_records: Vec<&UsnRecord> = records
+        .iter()
+        .filter(|r| r.reason.contains(UsnReason::RENAME_NEW_NAME))
+        .collect();
+
+    if rename_records.len() < 20 {
+        return indicators;
+    }
+
+    // Group by extension (excluding known ransomware - already handled above)
+    let mut ext_groups: HashMap<String, Vec<&UsnRecord>> = HashMap::new();
+
+    for record in &rename_records {
+        if let Some(dot_pos) = record.filename.rfind('.') {
+            let ext = record.filename[dot_pos..].to_lowercase();
+            // Skip common extensions
+            if !is_common_extension(&ext) {
+                let lower = ext.clone();
+                let is_known = RANSOMWARE_EXTENSIONS.iter().any(|&re| lower == re);
+                if !is_known {
+                    ext_groups.entry(ext).or_default().push(record);
+                }
+            }
+        }
+    }
+
+    // Report extensions with abnormally high rename counts in tight time windows
+    for (ext, group) in &ext_groups {
+        if group.len() >= 20 {
+            let Some(time_start) = group.iter().map(|r| r.timestamp).min() else {
+                continue;
+            };
+            let Some(time_end) = group.iter().map(|r| r.timestamp).max() else {
+                continue;
+            };
+            let duration = time_end - time_start;
+
+            // 20+ renames to the same unusual extension within 10 minutes is suspicious
+            if duration <= Duration::minutes(10) {
+                let sample: Vec<String> =
+                    group.iter().take(10).map(|r| r.filename.clone()).collect();
+
+                indicators.push(RansomwareIndicator {
+                    extension: ext.clone(),
+                    affected_count: group.len(),
+                    sample_filenames: sample,
+                    time_start,
+                    time_end,
+                    confidence: 0.75,
+                });
+            }
+        }
+    }
+
+    indicators
+}
+
+/// Check if an extension is common/benign.
+fn is_common_extension(ext: &str) -> bool {
+    matches!(
+        ext,
+        ".txt"
+            | ".doc"
+            | ".docx"
+            | ".xls"
+            | ".xlsx"
+            | ".pdf"
+            | ".jpg"
+            | ".jpeg"
+            | ".png"
+            | ".gif"
+            | ".mp3"
+            | ".mp4"
+            | ".avi"
+            | ".zip"
+            | ".rar"
+            | ".exe"
+            | ".dll"
+            | ".sys"
+            | ".log"
+            | ".tmp"
+            | ".bak"
+            | ".html"
+            | ".htm"
+            | ".css"
+            | ".js"
+            | ".py"
+            | ".rs"
+            | ".c"
+            | ".h"
+            | ".cpp"
+            | ".java"
+            | ".xml"
+            | ".json"
+            | ".csv"
+            | ".ppt"
+            | ".pptx"
+    )
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// Timestomping Detection
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// Indicator of timestamp manipulation.
+#[derive(Debug, Clone)]
+pub struct TimestompIndicator {
+    /// The filename whose timestamps may have been manipulated.
+    pub filename: String,
+    /// MFT entry number.
+    pub mft_entry: u64,
+    /// The timestamp of the `BASIC_INFO_CHANGE` event.
+    pub change_timestamp: DateTime<Utc>,
+    /// Whether data modification events were found nearby.
+    pub has_nearby_data_change: bool,
+    /// Confidence score (0.0 - 1.0).
+    pub confidence: f64,
+}
+
+/// Detect timestamp manipulation from USN records.
+///
+/// Timestomping is often visible in USN journals because:
+/// - Modifying `$STANDARD_INFORMATION` timestamps generates a `BASIC_INFO_CHANGE` event
+/// - Legitimate timestamp changes usually accompany data modifications
+/// - Isolated `BASIC_INFO_CHANGE` events without nearby data changes are suspicious
+#[must_use]
+pub fn detect_timestomping(records: &[UsnRecord]) -> Vec<TimestompIndicator> {
+    let mut indicators = Vec::new();
+
+    // Build a map of MFT entry -> records for correlation
+    let mut entry_events: HashMap<u64, Vec<&UsnRecord>> = HashMap::new();
+    for record in records {
+        entry_events
+            .entry(record.mft_entry)
+            .or_default()
+            .push(record);
+    }
+
+    // For each file, look for isolated BASIC_INFO_CHANGE events
+    for (&mft_entry, events) in &entry_events {
+        for (i, event) in events.iter().enumerate() {
+            if !event.reason.contains(UsnReason::BASIC_INFO_CHANGE) {
+                continue;
+            }
+
+            // Check if this BASIC_INFO_CHANGE has no accompanying data changes
+            // within a window of nearby events (5 events before/after or 60 seconds)
+            let has_nearby_data_change = events.iter().enumerate().any(|(j, other)| {
+                if i == j {
+                    return false;
+                }
+                let time_diff = if other.timestamp >= event.timestamp {
+                    other.timestamp - event.timestamp
+                } else {
+                    event.timestamp - other.timestamp
+                };
+                if time_diff > Duration::seconds(60) {
+                    return false;
+                }
+                other.reason.contains(UsnReason::DATA_OVERWRITE)
+                    || other.reason.contains(UsnReason::DATA_EXTEND)
+                    || other.reason.contains(UsnReason::DATA_TRUNCATION)
+                    || other.reason.contains(UsnReason::FILE_CREATE)
+            });
+
+            // Isolated BASIC_INFO_CHANGE is suspicious
+            if !has_nearby_data_change {
+                // Check if reason is ONLY BASIC_INFO_CHANGE (possibly with CLOSE)
+                let reason_without_close = event.reason & !UsnReason::CLOSE;
+                let is_isolated = reason_without_close == UsnReason::BASIC_INFO_CHANGE;
+
+                let confidence = if is_isolated { 0.8 } else { 0.5 };
+
+                indicators.push(TimestompIndicator {
+                    filename: event.filename.clone(),
+                    mft_entry,
+                    change_timestamp: event.timestamp,
+                    has_nearby_data_change: false,
+                    confidence,
+                });
+            }
+        }
+    }
+
+    indicators
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // Tests
@@ -16,7 +629,7 @@ mod tests {
     use chrono::{DateTime, Duration, Utc};
     use ntfs_core::usn::{FileAttributes, UsnReason, UsnRecord};
 
-    /// Helper to build a synthetic UsnRecord for testing.
+    /// Helper to build a synthetic `UsnRecord` for testing.
     fn make_record(
         mft_entry: u64,
         filename: &str,
