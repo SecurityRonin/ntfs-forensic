@@ -1,3 +1,308 @@
+//! Rule engine for pattern-matching USN journal activity.
+//!
+//! Lets analysts define rules that flag suspicious filenames, reason flags,
+//! and combinations thereof. Ships with forensically useful built-in rules.
+
+use regex::Regex;
+
+use ntfs_core::usn::{UsnReason, UsnRecord};
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+/// The canonical 5-level severity scale, shared across every `SecurityRonin`
+/// analyzer via [`forensicnomicon::report`].
+pub use forensicnomicon::report::Severity;
+
+/// How to match a filename.
+#[derive(Debug, Clone)]
+pub enum FilenameMatch {
+    /// Shell-style glob: supports `*` (any chars) and `?` (single char).
+    Glob(String),
+    /// Full regex pattern.
+    Regex(String),
+    /// Match file extension (e.g. `".ps1"`).
+    Extension(String),
+}
+
+/// A single detection rule.
+#[derive(Debug, Clone)]
+pub struct Rule {
+    /// Rule identifier (becomes the finding `code` suffix).
+    pub name: String,
+    /// Human-readable description of what the rule detects.
+    pub description: String,
+    /// Severity assigned to a match.
+    pub severity: Severity,
+    /// How (and whether) to match the record's filename.
+    pub filename_match: Option<FilenameMatch>,
+    /// Glob pattern; files matching this are excluded even if `filename_match` hits.
+    pub exclude_pattern: Option<String>,
+    /// Match if ANY of these reason flags are present on the record.
+    pub any_reasons: Option<UsnReason>,
+    /// Match only if ALL of these reason flags are present on the record.
+    pub all_reasons: Option<UsnReason>,
+}
+
+/// Result of a rule matching a record.
+#[derive(Debug, Clone)]
+pub struct RuleMatch {
+    /// Name of the rule that matched.
+    pub rule_name: String,
+    /// Severity of the matched rule.
+    pub severity: Severity,
+    /// The record that matched.
+    pub record: UsnRecord,
+    /// Description of the matched rule.
+    pub description: String,
+}
+
+/// A collection of rules evaluated against USN records.
+pub struct RuleSet {
+    rules: Vec<Rule>,
+}
+
+// ─── Glob matching (manual, no deps) ───────────────────────────────────────
+
+/// Simple case-insensitive glob match supporting `*` (any chars) and `?` (single char).
+fn glob_matches(pattern: &str, text: &str) -> bool {
+    glob_matches_inner(
+        pattern.to_ascii_lowercase().as_bytes(),
+        text.to_ascii_lowercase().as_bytes(),
+    )
+}
+
+fn glob_matches_inner(pattern: &[u8], text: &[u8]) -> bool {
+    let mut pi = 0;
+    let mut ti = 0;
+    let mut star_pi = usize::MAX;
+    let mut star_ti = 0;
+
+    while ti < text.len() {
+        if pi < pattern.len() && (pattern[pi] == b'?' || pattern[pi] == text[ti]) {
+            pi += 1;
+            ti += 1;
+        } else if pi < pattern.len() && pattern[pi] == b'*' {
+            star_pi = pi;
+            star_ti = ti;
+            pi += 1;
+        } else if star_pi != usize::MAX {
+            pi = star_pi + 1;
+            star_ti += 1;
+            ti = star_ti;
+        } else {
+            return false;
+        }
+    }
+
+    while pi < pattern.len() && pattern[pi] == b'*' {
+        pi += 1;
+    }
+    pi == pattern.len()
+}
+
+// ─── Rule evaluation ────────────────────────────────────────────────────────
+
+impl Rule {
+    /// Check whether this rule matches the given record. Returns `true` if all
+    /// configured conditions are satisfied (AND logic across condition types).
+    fn matches(&self, record: &UsnRecord) -> bool {
+        // Check exclude pattern first
+        if let Some(ref exclude) = self.exclude_pattern {
+            if glob_matches(exclude, &record.filename) {
+                return false;
+            }
+        }
+
+        // Check filename match
+        if let Some(ref fm) = self.filename_match {
+            let name_ok = match fm {
+                FilenameMatch::Glob(pat) => glob_matches(pat, &record.filename),
+                FilenameMatch::Regex(pat) => {
+                    if let Ok(re) = Regex::new(pat) {
+                        re.is_match(&record.filename)
+                    } else {
+                        false
+                    }
+                }
+                FilenameMatch::Extension(ext) => {
+                    let lower = record.filename.to_ascii_lowercase();
+                    let ext_lower = ext.to_ascii_lowercase();
+                    lower.ends_with(&ext_lower)
+                }
+            };
+            if !name_ok {
+                return false;
+            }
+        }
+
+        // Check any_reasons (OR logic: record must have at least one of the flags)
+        if let Some(any) = self.any_reasons {
+            if !record.reason.intersects(any) {
+                return false;
+            }
+        }
+
+        // Check all_reasons (AND logic: record must have every flag)
+        if let Some(all) = self.all_reasons {
+            if !record.reason.contains(all) {
+                return false;
+            }
+        }
+
+        true
+    }
+}
+
+// ─── RuleSet ────────────────────────────────────────────────────────────────
+
+impl Default for RuleSet {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RuleSet {
+    /// Create an empty rule set.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { rules: Vec::new() }
+    }
+
+    /// Create a rule set from a pre-built list of rules.
+    #[must_use]
+    pub fn from_rules(rules: Vec<Rule>) -> Self {
+        Self { rules }
+    }
+
+    /// Add a rule to the set.
+    pub fn add_rule(&mut self, rule: Rule) {
+        self.rules.push(rule);
+    }
+
+    /// Evaluate all rules against a single record and return every match.
+    #[must_use]
+    pub fn evaluate(&self, record: &UsnRecord) -> Vec<RuleMatch> {
+        self.rules
+            .iter()
+            .filter(|r| r.matches(record))
+            .map(|r| RuleMatch {
+                rule_name: r.name.clone(),
+                severity: r.severity,
+                record: record.clone(),
+                description: r.description.clone(),
+            })
+            .collect()
+    }
+
+    /// Create a rule set pre-loaded with forensically useful built-in rules.
+    #[must_use]
+    pub fn with_builtins() -> Self {
+        let mut rs = Self::new();
+
+        // ── suspicious_executables (High) ───────────────────────────────
+        rs.add_rule(Rule {
+            name: "suspicious_executables".into(),
+            description: "Known offensive tool or suspicious executable detected".into(),
+            severity: Severity::High,
+            filename_match: Some(FilenameMatch::Regex(
+                r"(?i)^(psexec(64)?|mimikatz|procdump(64)?|lazagne|rubeus|sharphound|bloodhound|cobalt|beacon|meterpreter|nc(at)?|whoami|pwdump|wce|gsecdump|secretsdump|kekeo|safetykatz)(\..+)?$".into(),
+            )),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        });
+
+        // ── ransomware_extensions (Critical) ────────────────────────────
+        rs.add_rule(Rule {
+            name: "ransomware_extensions".into(),
+            description: "File with ransomware-associated extension detected".into(),
+            severity: Severity::Critical,
+            filename_match: Some(FilenameMatch::Regex(
+                r"(?i)\.(encrypted|locked|crypto|crypt|enc|pay|ransom|locky|cerber|wcry|wncry|wncryt|zepto|odin|thor|aesir|osiris|hermes|dharma|phobos|ryuk|maze|conti|lockbit|hive)$".into(),
+            )),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        });
+
+        // ── secure_delete_pattern (High) ────────────────────────────────
+        // SDelete renames files to sequences of the same character (AAAA, BBBB, ..., ZZZZ).
+        // The regex crate doesn't support backreferences, so we enumerate A-Z repeats.
+        {
+            let alts: Vec<String> = (b'A'..=b'Z')
+                .map(|c| format!("{c}{{{min},}}", c = c as char, min = 5))
+                .collect();
+            let pattern = format!(r"^({alts})\..+$", alts = alts.join("|"));
+            rs.add_rule(Rule {
+                name: "secure_delete_pattern".into(),
+                description:
+                    "SDelete-style secure deletion pattern detected (repeated character filename)"
+                        .into(),
+                severity: Severity::High,
+                filename_match: Some(FilenameMatch::Regex(pattern)),
+                exclude_pattern: None,
+                any_reasons: None,
+                all_reasons: None,
+            });
+        }
+
+        // ── script_execution (Medium) ───────────────────────────────────
+        rs.add_rule(Rule {
+            name: "script_execution".into(),
+            description: "Script file activity detected".into(),
+            severity: Severity::Medium,
+            filename_match: Some(FilenameMatch::Regex(
+                r"(?i)\.(ps1|vbs|bat|cmd|js|wsf|hta|wsh|sct)$".into(),
+            )),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        });
+
+        // ── credential_access (High) ────────────────────────────────────
+        rs.add_rule(Rule {
+            name: "credential_access".into(),
+            description: "Activity on credential-related file detected".into(),
+            severity: Severity::High,
+            filename_match: Some(FilenameMatch::Regex(
+                r"(?i)(ntds\.dit|sam|security|system)".into(),
+            )),
+            exclude_pattern: None,
+            any_reasons: Some(UsnReason::FILE_CREATE | UsnReason::DATA_OVERWRITE),
+            all_reasons: None,
+        });
+
+        rs
+    }
+}
+
+impl RuleMatch {
+    /// Convert this rule match into a canonical [`forensicnomicon::report::Finding`].
+    #[must_use]
+    pub fn to_finding(
+        &self,
+        source: forensicnomicon::report::Source,
+    ) -> forensicnomicon::report::Finding {
+        use forensicnomicon::report::{Category, Finding, Location};
+        let code = format!(
+            "USN-{}",
+            self.rule_name.to_uppercase().replace([' ', '_'], "-")
+        );
+        let category = Category::from_code(&code);
+        Finding::observation(self.severity, category, code)
+            .note(self.description.clone())
+            .source(source)
+            .evidence_at(
+                "filename",
+                self.record.filename.clone(),
+                Location::Path(self.record.filename.clone()),
+            )
+            .evidence("reason", format!("{:?}", self.record.reason))
+            .evidence("timestamp", self.record.timestamp.to_rfc3339())
+            .build()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
