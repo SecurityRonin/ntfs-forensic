@@ -9,6 +9,181 @@
 //! - No traditional $MFT, so path reconstruction relies solely on journal rewind
 //! - V3 records have `major_version: 3`
 
+use std::collections::HashMap;
+use std::fmt;
+
+use crate::usn::UsnRecord;
+
+// ---- Types ----
+
+/// A full 128-bit ReFS file identifier.
+///
+/// Unlike NTFS which splits its 64-bit reference into a 48-bit MFT entry number
+/// and a 16-bit sequence number, ReFS uses an opaque 128-bit identifier. The upper
+/// and lower 64-bit halves have no defined entry/sequence semantics.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct RefsFileId(pub u128);
+
+impl RefsFileId {
+    /// Create a `RefsFileId` from a raw u128 value.
+    pub fn from_u128(value: u128) -> Self {
+        Self(value)
+    }
+
+    /// Extract the high 64 bits of the file ID.
+    pub fn high(&self) -> u64 {
+        (self.0 >> 64) as u64
+    }
+
+    /// Extract the low 64 bits of the file ID.
+    pub fn low(&self) -> u64 {
+        self.0 as u64
+    }
+}
+
+impl fmt::Display for RefsFileId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "0x{:016x}:0x{:016x}", self.high(), self.low())
+    }
+}
+
+/// A USN V3 record enriched with full 128-bit ReFS file references.
+///
+/// The standard `UsnRecord` truncates the 128-bit references to fit into
+/// `mft_entry: u64` + `mft_sequence: u16`. This wrapper preserves the full
+/// 128-bit file and parent references as they appeared in the raw V3 record.
+#[derive(Debug, Clone)]
+pub struct RefsRecord {
+    /// The underlying parsed USN record.
+    pub record: UsnRecord,
+    /// Full 128-bit file reference.
+    pub file_id: RefsFileId,
+    /// Full 128-bit parent reference.
+    pub parent_id: RefsFileId,
+}
+
+impl RefsRecord {
+    /// Wrap a `UsnRecord` with explicit 128-bit file references.
+    pub fn new(record: UsnRecord, file_id: RefsFileId, parent_id: RefsFileId) -> Self {
+        Self {
+            record,
+            file_id,
+            parent_id,
+        }
+    }
+}
+
+/// Analyzer for ReFS USN journal data.
+///
+/// Provides grouping by full 128-bit file ID, ReFS vs NTFS volume detection,
+/// and journal-rewind-only path reconstruction (since ReFS has no traditional MFT).
+pub struct RefsAnalyzer {
+    records: Vec<RefsRecord>,
+}
+
+impl RefsAnalyzer {
+    /// Create a new analyzer from a set of `RefsRecord`s.
+    pub fn new(records: Vec<RefsRecord>) -> Self {
+        Self { records }
+    }
+
+    /// Detect whether the records likely originate from a ReFS volume.
+    ///
+    /// Heuristic: if all records have `major_version == 3` and any record has
+    /// a `file_id` whose upper 64 bits are non-zero, it is likely ReFS.
+    /// Pure NTFS V3 records would have upper bits all zero.
+    pub fn is_likely_refs(&self) -> bool {
+        if self.records.is_empty() {
+            return false;
+        }
+
+        let all_v3 = self.records.iter().all(|r| r.record.major_version == 3);
+        if !all_v3 {
+            return false;
+        }
+
+        // If any file or parent reference has non-zero upper 64 bits,
+        // this is likely a ReFS volume (NTFS V3 refs fit in lower 64 bits).
+        self.records
+            .iter()
+            .any(|r| r.file_id.high() != 0 || r.parent_id.high() != 0)
+    }
+
+    /// Group records by their full 128-bit file ID.
+    ///
+    /// Returns a map from `RefsFileId` to all records referencing that file.
+    pub fn group_by_file_id(&self) -> HashMap<RefsFileId, Vec<&RefsRecord>> {
+        let mut groups: HashMap<RefsFileId, Vec<&RefsRecord>> = HashMap::new();
+        for rec in &self.records {
+            groups.entry(rec.file_id).or_default().push(rec);
+        }
+        groups
+    }
+
+    /// Reconstruct file paths using journal rewind only (no MFT seeding).
+    ///
+    /// ReFS has no traditional $MFT, so path reconstruction must rely entirely
+    /// on walking the USN journal backwards to build the directory tree from
+    /// rename and create events.
+    ///
+    /// Returns a map from `RefsFileId` to reconstructed path (if resolvable).
+    pub fn reconstruct_paths(&self) -> HashMap<RefsFileId, String> {
+        // Build a lookup: file_id -> (filename, parent_id)
+        // Use the most recent (last seen) name for each file ID.
+        let mut lookup: HashMap<RefsFileId, (String, RefsFileId)> = HashMap::new();
+
+        for rec in &self.records {
+            lookup.insert(rec.file_id, (rec.record.filename.clone(), rec.parent_id));
+        }
+
+        // Determine root IDs: any parent_id that has no entry in the lookup
+        // is considered a root anchor.
+        let root_ids: std::collections::HashSet<RefsFileId> = self
+            .records
+            .iter()
+            .map(|r| r.parent_id)
+            .filter(|pid| !lookup.contains_key(pid))
+            .collect();
+
+        // Resolve paths by walking parent chains up to a root.
+        let mut paths: HashMap<RefsFileId, String> = HashMap::new();
+
+        for &file_id in lookup.keys() {
+            if root_ids.contains(&file_id) {
+                continue;
+            }
+
+            let mut components = Vec::new();
+            let mut current = file_id;
+            let mut visited = std::collections::HashSet::new();
+
+            loop {
+                if !visited.insert(current) {
+                    // Cycle detected, stop
+                    break;
+                }
+
+                if let Some((name, parent)) = lookup.get(&current) {
+                    components.push(name.clone());
+                    if root_ids.contains(parent) || !lookup.contains_key(parent) {
+                        break;
+                    }
+                    current = *parent;
+                } else {
+                    break;
+                }
+            }
+
+            components.reverse();
+            if !components.is_empty() {
+                paths.insert(file_id, components.join("\\"));
+            }
+        }
+
+        paths
+    }
+}
+
 // ---- Tests ----
 
 #[cfg(test)]

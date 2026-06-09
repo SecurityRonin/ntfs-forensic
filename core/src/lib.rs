@@ -67,6 +67,7 @@ pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use logfile::{detect_journal_clearing, parse_logfile, LogFileSummary, RestartArea};
 pub use mftmirr::{compare_mft_mirror, MirrorComparison};
 pub use record::{apply_fixup, MftRecordHeader};
+pub use refs::{RefsAnalyzer, RefsFileId, RefsRecord};
 pub use runlist::{decode as decode_runlist, Run};
 pub use source::OffsetReader;
 pub use standard_information::StandardInformation;
