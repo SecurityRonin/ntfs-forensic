@@ -6,15 +6,178 @@
 //! The engine returns `TriageResult` structs indicating whether evidence was
 //! found and which record indices matched.
 
+use regex::Regex;
+
+use ntfs_core::rewind::ResolvedRecord;
+use ntfs_core::usn::UsnReason;
+
 pub mod queries;
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+/// A forensic triage question with its associated query filter.
+#[derive(Debug, Clone)]
+pub struct TriageQuestion {
+    /// Unique identifier (e.g. `malware_deployed`).
+    pub id: &'static str,
+    /// Category grouping (e.g. "Breach & Malware").
+    pub category: &'static str,
+    /// Human-readable question (e.g. "Were executables dropped in suspicious locations?").
+    pub question: &'static str,
+    /// The query filter to evaluate against records.
+    pub query: TriageQuery,
+}
+
+/// Filter criteria for a triage question.
+#[derive(Debug, Clone, Default)]
+pub struct TriageQuery {
+    /// Regex patterns matched against the full path (case-insensitive, any match).
+    pub path_patterns: Vec<&'static str>,
+    /// File extension filter (without dot, e.g. "exe", "dll").
+    pub extension_filter: Vec<&'static str>,
+    /// Reason flags; record must have at least one flag in common (intersects).
+    pub reasons: Option<UsnReason>,
+    /// Regex patterns; records matching any of these are excluded.
+    pub exclude_patterns: Vec<&'static str>,
+    /// Substring filters matched against the filename (case-insensitive, any match).
+    pub filename_filter: Vec<&'static str>,
+    /// Filter by record source (e.g. "carved", "ghost"). Empty = match all sources.
+    pub source_filter: Vec<&'static str>,
+}
+
+/// Result of evaluating a single triage question against the record set.
+pub struct TriageResult {
+    /// Matches the `TriageQuestion::id`.
+    pub id: &'static str,
+    /// Matches the `TriageQuestion::category`.
+    pub category: &'static str,
+    /// Matches the `TriageQuestion::question`.
+    pub question: &'static str,
+    /// Whether any records matched.
+    pub has_hits: bool,
+    /// Number of matching records.
+    pub hit_count: usize,
+    /// Indices into the input record slice for matching records.
+    pub record_indices: Vec<usize>,
+}
+
+// ─── Engine ─────────────────────────────────────────────────────────────────
+
+/// Run all triage questions against the resolved record set.
+///
+/// Returns one `TriageResult` per question, in the same order as the input.
+#[must_use]
+pub fn run_triage(questions: &[TriageQuestion], records: &[ResolvedRecord]) -> Vec<TriageResult> {
+    questions
+        .iter()
+        .map(|q| {
+            let record_indices: Vec<usize> = records
+                .iter()
+                .enumerate()
+                .filter(|(_, r)| matches_query(&q.query, r))
+                .map(|(i, _)| i)
+                .collect();
+            let hit_count = record_indices.len();
+            TriageResult {
+                id: q.id,
+                category: q.category,
+                question: q.question,
+                has_hits: hit_count > 0,
+                hit_count,
+                record_indices,
+            }
+        })
+        .collect()
+}
+
+/// Check whether a single resolved record matches the given query.
+fn matches_query(query: &TriageQuery, record: &ResolvedRecord) -> bool {
+    // An entirely empty query matches nothing (placeholder questions).
+    if query.path_patterns.is_empty()
+        && query.extension_filter.is_empty()
+        && query.reasons.is_none()
+        && query.exclude_patterns.is_empty()
+        && query.filename_filter.is_empty()
+        && query.source_filter.is_empty()
+    {
+        return false;
+    }
+
+    // Source filter: record source must match one of the listed sources.
+    if !query.source_filter.is_empty() {
+        let source_str = record.source.as_str();
+        if !query.source_filter.contains(&source_str) {
+            return false;
+        }
+    }
+
+    // Reason flag check: record must share at least one flag with the query.
+    if let Some(reasons) = query.reasons {
+        if !record.record.reason.intersects(reasons) {
+            return false;
+        }
+    }
+
+    // Path pattern check: at least one regex must match the full path.
+    if !query.path_patterns.is_empty() {
+        let path_lower = record.full_path.to_lowercase();
+        let any_match = query.path_patterns.iter().any(|pat| {
+            Regex::new(&pat.to_lowercase())
+                .map(|re| re.is_match(&path_lower))
+                .unwrap_or(false)
+        });
+        if !any_match {
+            return false;
+        }
+    }
+
+    // Extension filter: filename must end with one of the listed extensions.
+    if !query.extension_filter.is_empty() {
+        let name_lower = record.record.filename.to_lowercase();
+        let any_ext = query.extension_filter.iter().any(|ext| {
+            let dot_ext = format!(".{}", ext.to_lowercase());
+            name_lower.ends_with(&dot_ext)
+        });
+        if !any_ext {
+            return false;
+        }
+    }
+
+    // Filename filter: filename must contain at least one of the keywords.
+    if !query.filename_filter.is_empty() {
+        let name_lower = record.record.filename.to_lowercase();
+        let any_name = query
+            .filename_filter
+            .iter()
+            .any(|kw| name_lower.contains(&kw.to_lowercase()));
+        if !any_name {
+            return false;
+        }
+    }
+
+    // Exclude patterns: if any regex matches the full path, exclude the record.
+    if !query.exclude_patterns.is_empty() {
+        let path_lower = record.full_path.to_lowercase();
+        let any_exclude = query.exclude_patterns.iter().any(|pat| {
+            Regex::new(&pat.to_lowercase())
+                .map(|re| re.is_match(&path_lower))
+                .unwrap_or(false)
+        });
+        if any_exclude {
+            return false;
+        }
+    }
+
+    true
+}
 
 // ─── Tests ──────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ntfs_core::usn::{FileAttributes, UsnRecord};
     use chrono::DateTime;
+    use ntfs_core::usn::{FileAttributes, UsnRecord};
 
     /// Helper to create a `ResolvedRecord` for testing (defaults to Allocated source).
     fn make_resolved(full_path: &str, filename: &str, reason: UsnReason) -> ResolvedRecord {
