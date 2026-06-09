@@ -48,6 +48,7 @@ pub mod logfile;
 pub mod mftmirr;
 pub mod record;
 pub mod refs;
+pub mod rewind;
 pub mod runlist;
 pub mod source;
 pub mod standard_information;
