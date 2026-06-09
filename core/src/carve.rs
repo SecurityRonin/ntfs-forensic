@@ -147,29 +147,26 @@ fn try_carve_entry(
             break; // corrupt attribute chain
         }
 
-        if attr_type == ATTR_FILE_NAME {
-            // Resident attribute: parse FILE_NAME content
-            let non_resident = entry[attr_offset + 8];
-            if non_resident == 0 {
-                if let Some((name, parent_e, parent_s, ns)) =
-                    parse_filename_attr(entry, attr_offset)
-                {
-                    // Prefer Win32 or Win32+DOS over DOS
-                    let dominated = match &best_filename {
-                        None => true,
-                        Some((_, _, _, prev_ns)) => {
-                            // Replace if current is Win32/Win32+DOS and prev is DOS
-                            // or if we have no Win32 name yet
-                            *prev_ns == NS_DOS && (ns == NS_WIN32 || ns == NS_WIN32_AND_DOS)
-                                || *prev_ns != NS_WIN32
-                                    && *prev_ns != NS_WIN32_AND_DOS
-                                    && ns != NS_DOS
-                        }
-                    };
-                    if dominated {
-                        best_filename = Some((name, parent_e, parent_s, ns));
-                    }
+        // Only resident $FILE_NAME attributes carry an extractable name. The loop
+        // guard keeps `attr_offset + 8` within the entry, so the non-resident-flag
+        // read is in bounds.
+        let is_resident_filename = attr_type == ATTR_FILE_NAME && entry[attr_offset + 8] == 0;
+        if let Some((name, parent_e, parent_s, ns)) = is_resident_filename
+            .then(|| parse_filename_attr(entry, attr_offset))
+            .flatten()
+        {
+            // Prefer Win32 or Win32+DOS over DOS.
+            let dominated = match &best_filename {
+                None => true,
+                Some((_, _, _, prev_ns)) => {
+                    // Replace if current is Win32/Win32+DOS and prev is DOS,
+                    // or if we have no Win32 name yet.
+                    *prev_ns == NS_DOS && (ns == NS_WIN32 || ns == NS_WIN32_AND_DOS)
+                        || *prev_ns != NS_WIN32 && *prev_ns != NS_WIN32_AND_DOS && ns != NS_DOS
                 }
+            };
+            if dominated {
+                best_filename = Some((name, parent_e, parent_s, ns));
             }
         }
 
@@ -935,6 +932,46 @@ mod tests {
         let (entries, _) = carve_mft_entries(&buf);
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].filename, "LongFileName.xlsx");
+    }
+
+    #[test]
+    fn test_carve_resident_filename_parse_none_then_valid() {
+        // Covers the fall-through after a resident ($FILE_NAME, non_resident==0)
+        // attribute whose parse_filename_attr returns None: the attribute walk
+        // must continue and pick up a subsequent valid $FILE_NAME.
+        let mut buf = vec![0u8; MFT_ENTRY_SIZE];
+
+        buf[0..4].copy_from_slice(&FILE_SIGNATURE);
+        buf[4..6].copy_from_slice(&48u16.to_le_bytes());
+        buf[6..8].copy_from_slice(&3u16.to_le_bytes());
+        buf[8..16].copy_from_slice(&1u64.to_le_bytes());
+        buf[16..18].copy_from_slice(&1u16.to_le_bytes());
+        buf[18..20].copy_from_slice(&1u16.to_le_bytes());
+        let first_attr: u16 = 56;
+        buf[20..22].copy_from_slice(&first_attr.to_le_bytes());
+        buf[22..24].copy_from_slice(&0x01u16.to_le_bytes());
+        buf[24..28].copy_from_slice(&800u32.to_le_bytes());
+        buf[28..32].copy_from_slice(&1024u32.to_le_bytes());
+        buf[44..48].copy_from_slice(&99u32.to_le_bytes());
+        buf[48..50].copy_from_slice(&0x0001u16.to_le_bytes());
+
+        // First $FILE_NAME: resident (non_resident == 0) but content_size < 66,
+        // so parse_filename_attr returns None. attr_len is valid so the walk
+        // continues to the next attribute.
+        let bad_attr_size = 48usize;
+        buf[56..60].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        buf[60..64].copy_from_slice(&(bad_attr_size as u32).to_le_bytes());
+        buf[64] = 0; // resident
+        buf[72..76].copy_from_slice(&30u32.to_le_bytes()); // content_size = 30 < 66
+        buf[76..78].copy_from_slice(&24u16.to_le_bytes()); // content_offset
+
+        // Second $FILE_NAME: valid resident attribute that parses successfully.
+        let good_start = 56 + bad_attr_size;
+        write_filename_attr(&mut buf, good_start, 5, 1, "recovered.txt", NS_WIN32);
+
+        let (entries, _) = carve_mft_entries(&buf);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].filename, "recovered.txt");
     }
 
     // ─── Test: preserves all fields ──────────────────────────────────────────

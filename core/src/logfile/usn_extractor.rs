@@ -94,12 +94,9 @@ fn try_parse_usn_at(data: &[u8], offset: usize) -> Option<UsnRecord> {
         return None;
     }
 
+    // The bound above guarantees `slice.len() >= USN_V2_MIN_SIZE` (0x3C), so the
+    // 4-byte record_length and 2-byte major_version reads below are always safe.
     let slice = &data[offset..];
-
-    // Quick pre-validation: record_length and major_version
-    if slice.len() < 8 {
-        return None;
-    }
 
     let record_len = u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]) as usize;
 
@@ -157,12 +154,10 @@ fn extract_from_rcrd_page(page_data: &[u8], page_offset: usize) -> Vec<LogFileUs
     }
 
     // Extract the last_end_lsn from the RCRD page header at offset 0x18.
-    // This is the highest LSN represented in this page.
-    let page_lsn = if page_data.len() >= 0x20 {
-        read_u64_le(page_data, 0x18)
-    } else {
-        0
-    };
+    // This is the highest LSN represented in this page. The earlier
+    // `page_data.len() < RCRD_DATA_OFFSET` (0x40) guard already guarantees at
+    // least 0x40 bytes, so the 0x18..0x20 read is always in bounds.
+    let page_lsn = read_u64_le(page_data, 0x18);
 
     // Parse log records within the RCRD page data area
     let data_area = &page_data[RCRD_DATA_OFFSET..];
@@ -237,10 +232,9 @@ fn extract_from_rcrd_page(page_data: &[u8], page_offset: usize) -> Vec<LogFileUs
             // Zero-length client data - might be padding, try advancing by 8
             record_offset += 8;
         } else {
+            // This branch runs only when client_data_length > 0, so
+            // log_record_size >= 0x31 and the 8-byte-aligned size is never zero.
             let aligned_size = (log_record_size + 7) & !7;
-            if aligned_size == 0 {
-                break;
-            }
             record_offset += aligned_size;
         }
 
@@ -286,10 +280,8 @@ pub fn extract_usn_from_logfile(logfile_data: &[u8]) -> Vec<LogFileUsnRecord> {
     for page_idx in 0..page_count {
         let page_offset = page_idx * LOG_PAGE_SIZE;
 
-        // Check for RCRD signature
-        if page_offset + 4 > logfile_data.len() {
-            break;
-        }
+        // `page_count = logfile_data.len() / LOG_PAGE_SIZE` guarantees a full
+        // page (and hence the 4-byte signature) fits at every `page_offset`.
         let sig = &logfile_data[page_offset..page_offset + 4];
         if sig != RCRD_SIGNATURE {
             continue;
@@ -686,13 +678,12 @@ mod tests {
         page[data_offset + 0x18..data_offset + 0x1C].copy_from_slice(&0u32.to_le_bytes());
 
         let results = extract_usn_from_logfile(&page);
-        // Should not crash; may or may not find records in slack
-        assert!(
-            results.is_empty()
-                || results
-                    .iter()
-                    .all(|r| r.source == LogFileRecordSource::PageSlack)
-        );
+        // Should not crash; with zero client_data_length the log-record loop
+        // advances into slack, so any recovered records must come from page
+        // slack (the `.all` predicate is evaluated unconditionally).
+        assert!(results
+            .iter()
+            .all(|r| r.source == LogFileRecordSource::PageSlack));
     }
 
     #[test]

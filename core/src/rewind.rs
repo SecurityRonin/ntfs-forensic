@@ -347,6 +347,14 @@ mod tests {
     }
 
     #[test]
+    fn test_record_source_as_str() {
+        // Exercises every RecordSource::as_str match arm.
+        assert_eq!(RecordSource::Allocated.as_str(), "allocated");
+        assert_eq!(RecordSource::Carved.as_str(), "entry-carved");
+        assert_eq!(RecordSource::Ghost.as_str(), "ghost");
+    }
+
+    #[test]
     fn test_resolve_path_simple() {
         // MFT has: entry 100 "Users" -> root, entry 200 "admin" -> 100
         let engine = RewindEngine::from_mft(vec![

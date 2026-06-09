@@ -80,21 +80,18 @@ impl<R: Read + Seek> UsnJournalReader<R> {
         }
         self.buf_offset = 0;
 
-        // Read more data
-        let space = BUF_SIZE - self.buf_len;
-        if space > 0 {
-            let Some(dst) = self.buf.get_mut(self.buf_len..self.buf_len + space) else {
-                self.done = true;
-                return Ok(self.buf_len > 0);
-            };
-            let n = self.reader.read(dst)?;
-            if n == 0 {
-                self.done = true;
-                return Ok(self.buf_len > 0);
-            }
-            self.buf_len += n;
-            self.stream_pos += n as u64;
+        // Read more data into the free tail of the buffer. `self.buf` is always
+        // exactly BUF_SIZE bytes (allocated once, never resized) and the
+        // compaction above guarantees `self.buf_len < BUF_SIZE`, so splitting at
+        // `buf_len` always yields a valid, non-empty destination tail.
+        let (_, dst) = self.buf.split_at_mut(self.buf_len);
+        let n = self.reader.read(dst)?;
+        if n == 0 {
+            self.done = true;
+            return Ok(self.buf_len > 0);
         }
+        self.buf_len += n;
+        self.stream_pos += n as u64;
 
         Ok(true)
     }
@@ -107,10 +104,10 @@ impl<R: Read + Seek> UsnJournalReader<R> {
                     _ => return Ok(true),
                 }
             }
+            // A successful fill_buffer always advances buf_len past zero (it
+            // returns Ok(true) only after reading a non-zero number of bytes),
+            // so the outer loop re-checks the newly read window.
             if !self.fill_buffer()? {
-                return Ok(false);
-            }
-            if self.buf_len == 0 {
                 return Ok(false);
             }
         }
@@ -134,19 +131,13 @@ impl<R: Read + Seek> Iterator for UsnJournalReader<R> {
             }
         }
 
-        // Skip zero-filled regions
+        // Skip zero-filled regions. skip_zeros only returns Ok(true) once it has
+        // found a non-zero 8-byte window, which guarantees `buf_offset + 8 <=
+        // buf_len` here — enough for the record length + version fields below.
         match self.skip_zeros() {
             Ok(true) => {}
             Ok(false) => return None,
             Err(e) => return Some(Err(e)),
-        }
-
-        // Need at least 8 bytes for record length + version
-        if self.buf_offset + 8 > self.buf_len {
-            match self.fill_buffer() {
-                Ok(true) if self.buf_offset + 8 <= self.buf_len => {}
-                _ => return None,
-            }
         }
 
         let record_len = read_u32_le(&self.buf, self.buf_offset) as usize;
@@ -169,11 +160,10 @@ impl<R: Read + Seek> Iterator for UsnJournalReader<R> {
 
         let version = read_u16_le(&self.buf, self.buf_offset + 4);
 
-        let Some(record_data) = self.buf.get(self.buf_offset..self.buf_offset + record_len) else {
-            self.buf_offset += 8;
-            return self.next();
-        };
-        let record_data = record_data.to_vec();
+        // The record-fit check above guarantees `buf_offset + record_len <=
+        // buf_len <= buf.len()`, and `record_len <= 65536 <= BUF_SIZE`, so this
+        // record slice is always within the fixed-size buffer.
+        let record_data = self.buf[self.buf_offset..self.buf_offset + record_len].to_vec();
         let aligned = (record_len + 7) & !7;
         self.buf_offset += aligned;
 
@@ -464,12 +454,6 @@ mod tests {
             ));
         }
 
-        // Add a few zeros to push the next record across the buffer boundary
-        let remaining = BUF_SIZE - (num_records_to_fill * record_size);
-        if remaining > 0 && remaining < record_size {
-            data.extend_from_slice(&vec![0u8; remaining]);
-        }
-
         // Add more records after the boundary
         for i in 0..5 {
             data.extend_from_slice(&build_v2_record_bytes(
@@ -635,50 +619,6 @@ mod tests {
         }
     }
 
-    /// A reader that returns data in tiny chunks, simulating slow/partial reads.
-    /// After all data is consumed, `read()` returns 0 (EOF), which triggers
-    /// lines 61-62 (self.done = true; return `Ok(self.buf_len` > 0)).
-    struct TinyChunkReader {
-        data: Vec<u8>,
-        pos: u64,
-        chunk_size: usize,
-    }
-
-    impl TinyChunkReader {
-        fn new(data: Vec<u8>, chunk_size: usize) -> Self {
-            Self {
-                data,
-                pos: 0,
-                chunk_size,
-            }
-        }
-    }
-
-    impl Read for TinyChunkReader {
-        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-            let remaining = self.data.len() - self.pos as usize;
-            if remaining == 0 {
-                return Ok(0); // EOF - triggers lines 61-62
-            }
-            let to_read = buf.len().min(self.chunk_size).min(remaining);
-            let start = self.pos as usize;
-            buf[..to_read].copy_from_slice(&self.data[start..start + to_read]);
-            self.pos += to_read as u64;
-            Ok(to_read)
-        }
-    }
-
-    impl Seek for TinyChunkReader {
-        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
-            match pos {
-                SeekFrom::Start(n) => self.pos = n,
-                SeekFrom::End(n) => self.pos = (self.data.len() as i64 + n) as u64,
-                SeekFrom::Current(n) => self.pos = (self.pos as i64 + n) as u64,
-            }
-            Ok(self.pos)
-        }
-    }
-
     #[test]
     fn test_streaming_reader_done_flag_returns_none() {
         // Covers line 95: if self.done { return None; }
@@ -745,16 +685,12 @@ mod tests {
 
     #[test]
     fn test_streaming_reader_eof_mid_fill_with_remaining_data() {
-        // Covers lines 61-62: self.done = true; return Ok(self.buf_len > 0)
-        // We need a reader where read() returns 0 (EOF) while there's still
-        // unconsumed data in the buffer. Using TinyChunkReader that returns
-        // small chunks and eventually returns 0.
+        // fill_buffer's `n == 0` branch with buf_len > 0: the source reports more
+        // data than it delivers, so after the record is read, read() returns 0
+        // while stream_pos < total_size and the buffered record is still resolved.
         let record = build_v2_record_bytes(42, 1, 5, 5, 0x100, "tiny.txt");
-        let data_len = record.len();
-        // Use a chunk size smaller than BUF_SIZE so multiple reads are needed
-        // to fill the buffer. After the data is exhausted, read returns 0.
-        let tiny_reader = TinyChunkReader::new(record, data_len);
-        let mut reader = UsnJournalReader::new(tiny_reader).unwrap();
+        let lying = LyingSizeReader::new(record, 4096);
+        let mut reader = UsnJournalReader::new(lying).unwrap();
 
         let result = reader.next();
         assert!(result.is_some());
@@ -764,10 +700,10 @@ mod tests {
 
     #[test]
     fn test_streaming_reader_eof_mid_fill_no_remaining_data() {
-        // Also covers lines 61-62 with buf_len == 0 (returns Ok(false))
-        // An empty reader where read() immediately returns 0
-        let tiny_reader = TinyChunkReader::new(Vec::new(), 1);
-        let mut reader = UsnJournalReader::new(tiny_reader).unwrap();
+        // fill_buffer's `n == 0` branch with buf_len == 0: the source reports a
+        // non-zero size but read() returns 0 immediately, so it returns Ok(false).
+        let lying = LyingSizeReader::new(Vec::new(), 4096);
+        let mut reader = UsnJournalReader::new(lying).unwrap();
 
         let result = reader.next();
         assert!(result.is_none());
@@ -960,5 +896,76 @@ mod tests {
 
         // Should have found the fill records but skipped the truncated one
         assert!(records.len() >= records_to_fill);
+    }
+
+    /// A reader whose `seek(End)` over-reports the stream length: it claims to be
+    /// `phantom_extra` bytes longer than the data it actually returns. After the
+    /// real data is exhausted, `read()` returns 0 (EOF) even though `stream_pos`
+    /// has not yet reached the reported `total_size`. This drives the
+    /// `n == 0` early-out inside `fill_buffer` (the `done = true` /
+    /// `return Ok(self.buf_len > 0)` branch).
+    struct LyingSizeReader {
+        inner: Cursor<Vec<u8>>,
+        real_len: u64,
+        phantom_extra: u64,
+    }
+
+    impl LyingSizeReader {
+        fn new(data: Vec<u8>, phantom_extra: u64) -> Self {
+            let real_len = data.len() as u64;
+            Self {
+                inner: Cursor::new(data),
+                real_len,
+                phantom_extra,
+            }
+        }
+    }
+
+    impl Read for LyingSizeReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            // Delegates to the cursor: once real data is exhausted it returns 0
+            // (EOF), even though the reported total_size says there is more.
+            self.inner.read(buf)
+        }
+    }
+
+    impl Seek for LyingSizeReader {
+        fn seek(&mut self, pos: SeekFrom) -> std::io::Result<u64> {
+            // UsnJournalReader::new issues SeekFrom::End(0) to size the stream and
+            // SeekFrom::Start(0) to rewind. Intercept End to over-report the
+            // length so the reader believes more data exists than is delivered;
+            // delegate every other seek to the inner cursor.
+            if let SeekFrom::End(_) = pos {
+                return Ok(self.real_len + self.phantom_extra);
+            }
+            self.inner.seek(pos)
+        }
+    }
+
+    #[test]
+    fn test_streaming_reader_read_zero_with_buffered_record() {
+        // Covers the `n == 0` branch in fill_buffer with buf_len > 0:
+        // after one record is buffered and consumed, a later fill_buffer sees
+        // stream_pos < total_size (size was over-reported) yet read() returns 0,
+        // so it sets done=true and returns Ok(self.buf_len > 0).
+        let record = build_v2_record_bytes(100, 1, 5, 5, 0x100, "phantom.txt");
+        let lying = LyingSizeReader::new(record, 4096);
+        let reader = UsnJournalReader::new(lying).unwrap();
+
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].filename, "phantom.txt");
+    }
+
+    #[test]
+    fn test_streaming_reader_read_zero_with_empty_buffer() {
+        // Covers the `n == 0` branch in fill_buffer with buf_len == 0:
+        // the source reports a non-zero size but read() returns 0 immediately,
+        // so fill_buffer returns Ok(false) (self.buf_len > 0 is false).
+        let lying = LyingSizeReader::new(Vec::new(), 4096);
+        let mut reader = UsnJournalReader::new(lying).unwrap();
+
+        // total_size is reported as 4096 but the reader has no bytes to give.
+        assert!(reader.next().is_none());
     }
 }
