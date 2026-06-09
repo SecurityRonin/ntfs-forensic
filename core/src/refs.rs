@@ -148,24 +148,30 @@ impl RefsAnalyzer {
         // Resolve paths by walking parent chains up to a root.
         let mut paths: HashMap<RefsFileId, String> = HashMap::new();
 
-        // Every file_id is a lookup key, and root_ids only holds parent_ids that
-        // are absent from lookup, so a file_id is never itself a root anchor — the
-        // walk below always begins at a resolvable node.
         for &file_id in lookup.keys() {
+            if root_ids.contains(&file_id) {
+                continue; // cov:unreachable: root_ids only holds parent_ids absent from lookup (filtered by !lookup.contains_key), but file_id iterates lookup.keys() ⇒ it is in lookup, so never a root_id
+            }
+
             let mut components = Vec::new();
             let mut current = file_id;
             let mut visited = std::collections::HashSet::new();
 
-            // `current` is always a lookup key on entry: it starts at file_id and
-            // only advances to a parent that lookup.contains_key (the guard below
-            // breaks otherwise), so lookup.get(&current) is always Some.
-            while visited.insert(current) {
-                let (name, parent) = &lookup[&current];
-                components.push(name.clone());
-                if root_ids.contains(parent) || !lookup.contains_key(parent) {
+            loop {
+                if !visited.insert(current) {
+                    // Cycle detected, stop
                     break;
                 }
-                current = *parent;
+
+                if let Some((name, parent)) = lookup.get(&current) {
+                    components.push(name.clone());
+                    if root_ids.contains(parent) || !lookup.contains_key(parent) {
+                        break;
+                    }
+                    current = *parent;
+                } else {
+                    break; // cov:unreachable: current starts at a lookup key and only advances to *parent when lookup.contains_key(parent) holds (else the prior break fires), so lookup.get(&current) is always Some
+                }
             }
 
             components.reverse();

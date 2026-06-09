@@ -62,55 +62,55 @@ pub fn parse_logfile(data: &[u8]) -> Result<LogFileSummary> {
         let sig = &data[page_offset..page_offset + 4];
 
         if sig == RSTR_SIGNATURE {
-            // `page_count = data.len() / LOG_PAGE_SIZE` guarantees a full
-            // LOG_PAGE_SIZE (0x1000) page here, so the header reads below
-            // (all within the first 0x28 bytes) are always in bounds.
-            let current_lsn = u64::from_le_bytes(
-                data[page_offset + 0x08..page_offset + 0x10]
-                    .try_into()
-                    .unwrap_or([0; 8]),
-            );
-            let log_clients = u16::from_le_bytes(
-                data[page_offset + 0x10..page_offset + 0x12]
-                    .try_into()
-                    .unwrap_or([0; 2]),
-            );
-            let system_page_size = u32::from_le_bytes(
-                data[page_offset + 0x20..page_offset + 0x24]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
-            let log_page_size = u32::from_le_bytes(
-                data[page_offset + 0x24..page_offset + 0x28]
-                    .try_into()
-                    .unwrap_or([0; 4]),
-            );
+            if page_offset + 0x28 <= data.len() {
+                let current_lsn = u64::from_le_bytes(
+                    data[page_offset + 0x08..page_offset + 0x10]
+                        .try_into()
+                        .unwrap_or([0; 8]),
+                );
+                let log_clients = u16::from_le_bytes(
+                    data[page_offset + 0x10..page_offset + 0x12]
+                        .try_into()
+                        .unwrap_or([0; 2]),
+                );
+                let system_page_size = u32::from_le_bytes(
+                    data[page_offset + 0x20..page_offset + 0x24]
+                        .try_into()
+                        .unwrap_or([0; 4]),
+                );
+                let log_page_size = u32::from_le_bytes(
+                    data[page_offset + 0x24..page_offset + 0x28]
+                        .try_into()
+                        .unwrap_or([0; 4]),
+                );
 
-            if current_lsn > highest_lsn {
-                highest_lsn = current_lsn;
-            }
+                if current_lsn > highest_lsn {
+                    highest_lsn = current_lsn;
+                }
 
-            restart_areas.push(RestartArea {
-                offset: page_offset,
-                current_lsn,
-                log_clients,
-                system_page_size,
-                log_page_size,
-            });
+                restart_areas.push(RestartArea {
+                    offset: page_offset,
+                    current_lsn,
+                    log_clients,
+                    system_page_size,
+                    log_page_size,
+                });
+            } // cov:unreachable: page_count = data.len() / LOG_PAGE_SIZE (0x1000) ⇒ each page is a full 4096 bytes, so page_offset + 0x28 always fits; the false-branch is unreachable
             last_page_had_rcrd = false;
         } else if sig == RCRD_SIGNATURE {
             record_page_count += 1;
 
-            // Extract last_end_lsn from RCRD header (offset 0x18). The full-page
-            // guarantee above keeps the 0x18..0x20 read in bounds.
-            let page_lsn = u64::from_le_bytes(
-                data[page_offset + 0x18..page_offset + 0x20]
-                    .try_into()
-                    .unwrap_or([0; 8]),
-            );
-            if page_lsn > highest_lsn {
-                highest_lsn = page_lsn;
-            }
+            // Extract last_end_lsn from RCRD header (offset 0x18)
+            if page_offset + 0x20 <= data.len() {
+                let page_lsn = u64::from_le_bytes(
+                    data[page_offset + 0x18..page_offset + 0x20]
+                        .try_into()
+                        .unwrap_or([0; 8]),
+                );
+                if page_lsn > highest_lsn {
+                    highest_lsn = page_lsn;
+                }
+            } // cov:unreachable: page_count = data.len() / LOG_PAGE_SIZE (0x1000) ⇒ each page is a full 4096 bytes, so page_offset + 0x20 always fits; the false-branch is unreachable
 
             last_page_had_rcrd = true;
         } else {
