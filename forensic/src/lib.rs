@@ -7,6 +7,7 @@
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
 pub mod analysis;
+pub mod correlation;
 pub mod rules;
 
 use forensicnomicon::ntfs::{attr_types, SIGNATURE_BAAD, SIGNATURE_FILE};
