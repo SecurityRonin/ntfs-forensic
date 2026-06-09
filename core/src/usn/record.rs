@@ -640,7 +640,7 @@ mod tests {
         let record_len = 0x3Cu32;
         data[0..4].copy_from_slice(&record_len.to_le_bytes());
         data[4..6].copy_from_slice(&2u16.to_le_bytes());
-        let file_ref = 100u64 | (3u64 << 48);
+        let file_ref = 100u64 + (3u64 << 48);
         data[0x08..0x10].copy_from_slice(&file_ref.to_le_bytes());
         let parent_ref = 5u64 | (5u64 << 48);
         data[0x10..0x18].copy_from_slice(&parent_ref.to_le_bytes());

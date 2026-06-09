@@ -121,11 +121,10 @@ fn matches_query(query: &TriageQuery, record: &ResolvedRecord) -> bool {
     // Path pattern check: at least one regex must match the full path.
     if !query.path_patterns.is_empty() {
         let path_lower = record.full_path.to_lowercase();
-        let any_match = query.path_patterns.iter().any(|pat| {
-            Regex::new(&pat.to_lowercase())
-                .map(|re| re.is_match(&path_lower))
-                .unwrap_or(false)
-        });
+        let any_match = query
+            .path_patterns
+            .iter()
+            .any(|pat| Regex::new(&pat.to_lowercase()).is_ok_and(|re| re.is_match(&path_lower)));
         if !any_match {
             return false;
         }
@@ -158,11 +157,10 @@ fn matches_query(query: &TriageQuery, record: &ResolvedRecord) -> bool {
     // Exclude patterns: if any regex matches the full path, exclude the record.
     if !query.exclude_patterns.is_empty() {
         let path_lower = record.full_path.to_lowercase();
-        let any_exclude = query.exclude_patterns.iter().any(|pat| {
-            Regex::new(&pat.to_lowercase())
-                .map(|re| re.is_match(&path_lower))
-                .unwrap_or(false)
-        });
+        let any_exclude = query
+            .exclude_patterns
+            .iter()
+            .any(|pat| Regex::new(&pat.to_lowercase()).is_ok_and(|re| re.is_match(&path_lower)));
         if any_exclude {
             return false;
         }

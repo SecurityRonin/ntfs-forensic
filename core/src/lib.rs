@@ -24,7 +24,7 @@
 //! - [`compress::decompress`] — LZNT1.
 //! - [`fs::NtfsFs`] — path resolution and file read over any `Read + Seek`.
 //! - [`source::OffsetReader`] — open a partition inside a whole-disk image.
-//! - [`forensic`] — Tier-2: timestomp, ADS, slack, deleted-record carving.
+//! - `ntfs-forensic` (sibling crate) — Tier-2: timestomp, ADS, slack, deleted-record carving.
 //!
 //! Hardened against crafted input and exercised by `cargo-fuzz`
 //! (see `fuzz/`); the boot parser is cross-validated against The Sleuth Kit on
