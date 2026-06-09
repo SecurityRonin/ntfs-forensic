@@ -45,6 +45,7 @@ pub mod file_name;
 pub mod fs;
 pub mod index;
 pub mod logfile;
+pub mod mft;
 pub mod mftmirr;
 pub mod record;
 pub mod refs;
