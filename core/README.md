@@ -41,14 +41,24 @@ The bare crate name `ntfs` on crates.io is Colin Finck's general-purpose reader,
 
 ### `$UsnJrnl:$J` change journal
 
-A full change-journal reader, not just a record decoder:
+A full change-journal reader, not just a record decoder. The headline capability is **full-path reconstruction**: the journal stores only each event's *own* filename, but `RewindEngine` reconstructs the complete path of every event — **even for deleted files whose `$MFT` record was reused** — by replaying the journal:
 
+```rust
+let mut engine = ntfs_core::mft::MftData::parse(&mft_bytes)?.seed_rewind();
+for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
+    // resolved.full_path, resolved.record.reason, resolved.source (Allocated/Carved/Ghost)
+}
+# Ok::<(), ntfs_core::NtfsError>(())
+```
+
+- `RewindEngine` / `ResolvedRecord` — **full-path reconstruction** via the *Rewind* algorithm: two passes (reverse + forward) so renames and MFT-entry reuse resolve to the correct path at each point in time.
+- `MftData` / `MftEntry` — high-level `$MFT` aggregator (`$SI`/`$FN` timestamps, ADS, path resolution) that seeds the `RewindEngine`.
 - `parse_usn_record_v2` / `parse_usn_record_v3` / `parse_usn_journal` · `UsnRecord` / `UsnReason` / `FileAttributes` — decode V2/V3 records (MFT + parent-MFT references, reason flags, filename, attributes, timestamp).
 - `UsnJournalReader` — streaming, low-memory iterator over a `$J` stream too large to load whole.
 - `carve_usn_records` — recover USN records from free space and corrupt journals (V2/V3, timestamp-range gated).
-- `RewindEngine` — CyberCX two-phase (reverse + forward) **full-path reconstruction** with rename / MFT-reuse handling.
-- `MftData` / `MftEntry` — high-level `$MFT` aggregator (`$SI`/`$FN` timestamps, ADS, path resolution) that seeds the `RewindEngine`.
 - `RefsAnalyzer` / `RefsFileId` — ReFS USN V3 support (128-bit file IDs, journal-rewind-only path reconstruction).
+
+> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by **[CyberCX](https://cybercx.com.au/)** in their `usnjrnl_rewind` research; `RewindEngine` is an independent, clean-room Rust implementation.
 
 ## Trust, but verify
 

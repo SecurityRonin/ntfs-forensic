@@ -7,7 +7,7 @@
 [![CI](https://github.com/SecurityRonin/ntfs-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/ntfs-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
-**A from-scratch NTFS reader and a graded anomaly auditor — surface the timestomping, alternate data streams, deleted records, and MFT slack that a "clean" filesystem driver is built to hide.**
+**A from-scratch NTFS reader and a graded anomaly auditor — reconstruct full file paths from the `$UsnJrnl:$J` change journal (even for deleted, MFT-reused files), and surface the timestomping, alternate data streams, deleted records, and MFT slack that a "clean" filesystem driver is built to hide.**
 
 Two crates, one workspace:
 
@@ -107,9 +107,32 @@ Most NTFS crates answer one question: "what files are on this volume?" This work
 | `$MFTMirr` / `$LogFile` tamper checks | ✗ | ✅ |
 | Update-sequence (fixup) torn-write detection | ✗ | ✅ |
 | `$UsnJrnl:$J` change-journal record decode (create / delete / rename / overwrite history) | ✗ | ✅ |
+| **`$UsnJrnl:$J` full-path reconstruction** (the *Rewind* algorithm — full paths even for deleted + MFT-reused files) | ✗ | ✅ |
+| USN streaming reader + free-space USN record carving | ✗ | ✅ |
+| ReFS USN V3 (128-bit file references) | ✗ | ✅ |
 | Partition-window isolation (cannot read past the volume) | ✗ | ✅ |
 | Severity-graded `report::Finding` output | ✗ | ✅ |
 | `#![forbid(unsafe_code)]` | — | ✅ |
+
+## `$UsnJrnl:$J`: reconstruct full paths — even for deleted files
+
+The USN change journal records *what* changed and *which* MFT entry — but only the file's **own name**, never its path. `ntfs-core` reconstructs the **full path** of every journal event, including files that were deleted and whose `$MFT` record was later reused, by walking the journal with the *Rewind* algorithm:
+
+```rust
+use ntfs_core::mft::MftData;
+
+// Seed from the live $MFT, then rewind the $UsnJrnl:$J event stream.
+let mut engine = MftData::parse(&mft_bytes)?.seed_rewind();
+for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
+    println!("{:<10?} {:<12?} {}", resolved.source, resolved.record.reason, resolved.full_path);
+    // Allocated  FILE_DELETE  \Users\victim\AppData\Local\Temp\evil.exe
+}
+# Ok::<(), ntfs_core::NtfsError>(())
+```
+
+`RewindEngine` runs **two passes — reverse, then forward** — so a rename or an MFT-entry reuse part-way through the journal resolves to the *correct* path at each point in time. Events whose parent is no longer present in the live `$MFT` still resolve from the journal's own create/rename history, tagged `RecordSource::Carved` or `Ghost`. For journals too large to hold in memory, `UsnJournalReader` streams them; `carve_usn_records` recovers events from journal slack and unallocated space; and `RefsAnalyzer` handles ReFS's 128-bit USN V3 references.
+
+> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by **[CyberCX](https://cybercx.com.au/)** in their `usnjrnl_rewind` research. This is an independent, clean-room Rust implementation built on `ntfs-core`'s own parsers; its SQLite export is column-compatible with `usnjrnl_rewind`.
 
 ## Reader API (`ntfs-core`)
 
@@ -126,7 +149,12 @@ Most NTFS crates answer one question: "what files are on this volume?" This work
 | `decompress` | LZNT1 decompression |
 | `carve_mft_entries` | Carve `FILE`/`BAAD` records from a raw `$MFT` region |
 | `compare_mft_mirror` / `parse_logfile` / `detect_journal_clearing` | `$MFTMirr` / `$LogFile` parsing primitives |
-| `parse_usn_record_v2` / `UsnRecord` / `UsnReason` / `FileAttributes` | Decode `$UsnJrnl:$J` change-journal records (V2/V3) — each event's MFT + parent-MFT reference, reason flags, filename, attributes, and timestamp |
+| `parse_usn_record_v2` / `parse_usn_journal` / `UsnRecord` / `UsnReason` / `FileAttributes` | Decode `$UsnJrnl:$J` change-journal records (V2/V3) — each event's MFT + parent-MFT reference, reason flags, filename, attributes, and timestamp |
+| `UsnJournalReader` | Streaming, low-memory iterator over a `$J` stream too large to load whole |
+| `carve_usn_records` | Recover USN records from journal slack and unallocated space |
+| `MftData` / `MftEntry` | High-level `$MFT` aggregator (`$SI`/`$FN` timestamps, ADS, path resolution); seeds the rewind engine |
+| `RewindEngine` / `ResolvedRecord` | **Full-path reconstruction** from the USN journal (the *Rewind* algorithm — two-pass, rename- and MFT-reuse-aware) |
+| `RefsAnalyzer` / `RefsFileId` | ReFS USN V3 (128-bit file references), journal-rewind-only path reconstruction |
 | `OffsetReader` | Bounded partition window |
 
 The auditor primitives — `detect_timestomp`, `alternate_data_streams`, `record_slack`, `is_deleted`, `carve_file_records` — live in `ntfs-forensic` alongside `audit_record`.
@@ -148,7 +176,7 @@ cargo +nightly fuzz run record   # requires nightly + cargo-fuzz
 
 ## Where this fits
 
-`ntfs-core` is the NTFS FS-layer foundation for the SecurityRonin forensic family — [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) builds full `$UsnJrnl:$J` path reconstruction (journal rewind) on `ntfs-core`'s USN record decoder, and [`issen`](https://github.com/SecurityRonin/issen) consumes the workspace as its single, auditable NTFS engine. To get a `Read + Seek` over a disk image and locate the NTFS partition within it, these crates compose upstream:
+`ntfs-core` is the NTFS FS-layer foundation for the SecurityRonin forensic family. The full `$UsnJrnl:$J` reader stack — decode, streaming, carving, and *Rewind* full-path reconstruction — lives **in `ntfs-core`**; [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) is now a thin CLI shell over it (output formats, live monitoring), and [`issen`](https://github.com/SecurityRonin/issen) consumes the workspace as its single, auditable NTFS engine. To get a `Read + Seek` over a disk image and locate the NTFS partition within it, these crates compose upstream:
 
 | Crate | Role |
 |---|---|
