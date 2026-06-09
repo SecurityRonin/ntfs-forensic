@@ -11,7 +11,7 @@
 
 Two crates, one workspace:
 
-- **[`ntfs-core`](https://crates.io/crates/ntfs-core)** — the reader: `$MFT`, attributes, indexes, data runs, LZNT1, and `NtfsFs` path navigation over any `Read + Seek` source. No `unsafe`, no C bindings.
+- **[`ntfs-core`](https://crates.io/crates/ntfs-core)** — the reader: `$MFT`, attributes, indexes, data runs, LZNT1, `$UsnJrnl:$J` change-journal record decode, and `NtfsFs` path navigation over any `Read + Seek` source. No `unsafe`, no C bindings.
 - **[`ntfs-forensic`](https://crates.io/crates/ntfs-forensic)** — the auditor: turns parsed MFT records into severity-graded [`forensicnomicon::report::Finding`](https://crates.io/crates/forensicnomicon)s, so an NTFS volume's anomalies aggregate uniformly with the partition and container layers.
 
 ## Audit a raw MFT record in 30 seconds
@@ -79,7 +79,7 @@ The bare crate name `ntfs` on crates.io is Colin Finck's general-purpose reader,
 
 ### Opening a partition inside a whole disk
 
-`OffsetReader` re-bases a partition to offset 0 and **structurally cannot read past the partition boundary** — feed it the offset and length from [`mbr-forensic`](https://github.com/SecurityRonin/mbr-forensic) / [`gpt-forensic`](https://github.com/SecurityRonin/gpt-forensic):
+`OffsetReader` re-bases a partition to offset 0 and **structurally cannot read past the partition boundary** — feed it the offset and length from [`mbr-forensic`](https://github.com/SecurityRonin/mbr-forensic) / [`gpt-partition-forensic`](https://github.com/SecurityRonin/gpt-partition-forensic):
 
 ```rust
 use ntfs_core::{NtfsFs, OffsetReader};
@@ -106,6 +106,7 @@ Most NTFS crates answer one question: "what files are on this volume?" This work
 | MFT record slack extraction | ✗ | ✅ |
 | `$MFTMirr` / `$LogFile` tamper checks | ✗ | ✅ |
 | Update-sequence (fixup) torn-write detection | ✗ | ✅ |
+| `$UsnJrnl:$J` change-journal record decode (create / delete / rename / overwrite history) | ✗ | ✅ |
 | Partition-window isolation (cannot read past the volume) | ✗ | ✅ |
 | Severity-graded `report::Finding` output | ✗ | ✅ |
 | `#![forbid(unsafe_code)]` | — | ✅ |
@@ -125,6 +126,7 @@ Most NTFS crates answer one question: "what files are on this volume?" This work
 | `decompress` | LZNT1 decompression |
 | `carve_mft_entries` | Carve `FILE`/`BAAD` records from a raw `$MFT` region |
 | `compare_mft_mirror` / `parse_logfile` / `detect_journal_clearing` | `$MFTMirr` / `$LogFile` parsing primitives |
+| `parse_usn_record_v2` / `UsnRecord` / `UsnReason` / `FileAttributes` | Decode `$UsnJrnl:$J` change-journal records (V2/V3) — each event's MFT + parent-MFT reference, reason flags, filename, attributes, and timestamp |
 | `OffsetReader` | Bounded partition window |
 
 The auditor primitives — `detect_timestomp`, `alternate_data_streams`, `record_slack`, `is_deleted`, `carve_file_records` — live in `ntfs-forensic` alongside `audit_record`.
@@ -146,13 +148,13 @@ cargo +nightly fuzz run record   # requires nightly + cargo-fuzz
 
 ## Where this fits
 
-`ntfs-core` is the NTFS FS-layer foundation for the SecurityRonin forensic family — [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) and [`issen`](https://github.com/SecurityRonin/issen) consume it as their single, auditable NTFS engine. To get a `Read + Seek` over a disk image and locate the NTFS partition within it, these crates compose upstream:
+`ntfs-core` is the NTFS FS-layer foundation for the SecurityRonin forensic family — [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) builds full `$UsnJrnl:$J` path reconstruction (journal rewind) on `ntfs-core`'s USN record decoder, and [`issen`](https://github.com/SecurityRonin/issen) consumes the workspace as its single, auditable NTFS engine. To get a `Read + Seek` over a disk image and locate the NTFS partition within it, these crates compose upstream:
 
 | Crate | Role |
 |---|---|
 | [`disk-forensic`](https://github.com/SecurityRonin/disk-forensic) | **Orchestrator** — auto-detects MBR / GPT / APM and yields each partition's offset / length |
 | [`mbr-forensic`](https://github.com/SecurityRonin/mbr-forensic) | MBR partition table → NTFS partition offset / length |
-| [`gpt-forensic`](https://github.com/SecurityRonin/gpt-forensic) | GPT partition table → NTFS partition offset / length |
+| [`gpt-partition-forensic`](https://github.com/SecurityRonin/gpt-partition-forensic) | GPT partition table → NTFS partition offset / length |
 | [`ewf-forensic`](https://github.com/SecurityRonin/ewf-forensic) | E01 / Expert Witness Format container |
 | [`vhdx-forensic`](https://github.com/SecurityRonin/vhdx-forensic) | VHDX container |
 

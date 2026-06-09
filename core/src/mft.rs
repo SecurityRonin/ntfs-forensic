@@ -399,8 +399,8 @@ mod tests {
         use chrono::DateTime;
         let mut entry = make_mft_entry(100, 1, "suspicious.exe", 5, 5, false, true);
         // SI created is before FN created -> timestomped
-        entry.si_created = Some(DateTime::from_timestamp(1700000000, 0).unwrap());
-        entry.fn_created = Some(DateTime::from_timestamp(1700001000, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+        entry.fn_created = Some(DateTime::from_timestamp(1_700_001_000, 0).unwrap());
 
         let mut by_entry = HashMap::new();
         by_entry.insert(100u64, 0usize);
@@ -420,9 +420,9 @@ mod tests {
         use chrono::DateTime;
         let mut entry = make_mft_entry(100, 1, "modified.exe", 5, 5, false, true);
         // SI created is same as FN, but SI modified is before FN created
-        entry.si_created = Some(DateTime::from_timestamp(1700001000, 0).unwrap());
-        entry.si_modified = Some(DateTime::from_timestamp(1700000000, 0).unwrap());
-        entry.fn_created = Some(DateTime::from_timestamp(1700001000, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_700_001_000, 0).unwrap());
+        entry.si_modified = Some(DateTime::from_timestamp(1_700_000_000, 0).unwrap());
+        entry.fn_created = Some(DateTime::from_timestamp(1_700_001_000, 0).unwrap());
 
         let mft_data = MftData {
             entries: vec![entry],
@@ -438,7 +438,7 @@ mod tests {
     fn test_detect_timestomping_none_when_consistent() {
         use chrono::DateTime;
         let mut entry = make_mft_entry(100, 1, "normal.txt", 5, 5, false, true);
-        let ts = DateTime::from_timestamp(1700001000, 0).unwrap();
+        let ts = DateTime::from_timestamp(1_700_001_000, 0).unwrap();
         entry.si_created = Some(ts);
         entry.si_modified = Some(ts);
         entry.fn_created = Some(ts);
@@ -531,7 +531,7 @@ mod tests {
         use chrono::DateTime;
         let mut entry = make_mft_entry(100, 1, "check.exe", 5, 5, false, true);
         // SI created == FN created, SI modified is None
-        let ts = DateTime::from_timestamp(1700001000, 0).unwrap();
+        let ts = DateTime::from_timestamp(1_700_001_000, 0).unwrap();
         entry.si_created = Some(ts);
         entry.si_modified = None;
         entry.fn_created = Some(ts);
@@ -605,8 +605,8 @@ mod tests {
             data[o + 0x16..o + 0x18].copy_from_slice(&0x01u16.to_le_bytes()); // flags: in-use
             data[o + 0x18..o + 0x1C].copy_from_slice(&0x38u32.to_le_bytes()); // bytes used
             data[o + 0x1C..o + 0x20].copy_from_slice(&1024u32.to_le_bytes()); // allocated size
-                                                                              // Write end-of-attributes marker (0xFFFFFFFF) at first attribute offset
-            data[o + 0x38..o + 0x3C].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+                                                                              // Write end-of-attributes marker (0xFFFF_FFFF) at first attribute offset
+            data[o + 0x38..o + 0x3C].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
         }
         let mft_data = MftData::parse(&data).unwrap();
         // All entries lack $FILE_NAME, so should be skipped via `continue`
@@ -669,9 +669,9 @@ mod tests {
     /// Build a synthetic MFT record binary that the `mft` crate can parse.
     /// This constructs:
     /// - FILE record header (0x38 bytes, fixup at 0x30)
-    /// - $STANDARD_INFORMATION attribute (type 0x10, 96 bytes of data)
+    /// - $`STANDARD_INFORMATION` attribute (type 0x10, 96 bytes of data)
     /// - $FILE_NAME attribute (type 0x30, variable size)
-    /// - End marker (0xFFFFFFFF)
+    /// - End marker (`0xFFFF_FFFF`)
     ///   Covers lines 70-72, 92-97, 104, 108-114, 117-118, 120-123, 129-130, 136, 158-160
     fn build_mft_entry_bytes(
         entry_number: u32,
@@ -689,7 +689,7 @@ mod tests {
         // attr data: 72 bytes (4 timestamps x 8 bytes + class_id + owner_id + security_id + quota_charged + usn)
         let si_data_size: u32 = 72;
         let si_attr_header_size: u16 = 24;
-        let si_total_size: u32 = si_attr_header_size as u32 + si_data_size;
+        let si_total_size: u32 = u32::from(si_attr_header_size) + si_data_size;
         let si_total_aligned = (si_total_size + 7) & !7;
 
         // $FILE_NAME attribute:
@@ -697,12 +697,12 @@ mod tests {
         // FN data: parent_ref(8) + created(8) + modified(8) + mft_mod(8) + accessed(8) + alloc_size(8) + real_size(8) + flags(4) + reparse(4) + name_len(1) + name_type(1) + name(fn_name_len*2)
         let fn_data_size: u32 = 66 + (fn_name_len as u32 * 2);
         let fn_attr_header_size: u16 = 24;
-        let fn_total_size: u32 = fn_attr_header_size as u32 + fn_data_size;
+        let fn_total_size: u32 = u32::from(fn_attr_header_size) + fn_data_size;
         let fn_total_aligned = (fn_total_size + 7) & !7;
 
         // Total record size (must be multiple of 8)
         let first_attr_offset: u16 = 0x38; // standard for NTFS
-        let bytes_used: u32 = first_attr_offset as u32 + si_total_aligned + fn_total_aligned + 8; // +8 for end marker + padding
+        let bytes_used: u32 = u32::from(first_attr_offset) + si_total_aligned + fn_total_aligned + 8; // +8 for end marker + padding
         let alloc_size: u32 = 1024;
         let mut buf = vec![0u8; alloc_size as usize];
 
@@ -767,7 +767,7 @@ mod tests {
 
         let fn_data_off = off + fn_attr_header_size as usize;
         // Parent directory MFT reference (6 bytes entry + 2 bytes sequence)
-        let parent_ref = parent_entry | ((parent_seq as u64) << 48);
+        let parent_ref = parent_entry | (u64::from(parent_seq) << 48);
         buf[fn_data_off..fn_data_off + 8].copy_from_slice(&parent_ref.to_le_bytes());
         // Timestamps in FN (4 x 8 bytes)
         buf[fn_data_off + 8..fn_data_off + 16].copy_from_slice(&ts.to_le_bytes()); // created
@@ -793,7 +793,7 @@ mod tests {
         off += fn_total_aligned as usize;
 
         // End of attributes marker
-        buf[off..off + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        buf[off..off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         buf
     }
@@ -855,7 +855,7 @@ mod tests {
                 entry_data[off + 2],
                 entry_data[off + 3],
             ]);
-            if attr_type == 0xFFFFFFFF {
+            if attr_type == 0xFFFF_FFFF {
                 break;
             }
             let attr_size = u32::from_le_bytes([
@@ -881,7 +881,7 @@ mod tests {
                                      // For named attrs, name_offset points within the attr header
         let ads_name_offset = ads_attr_header_size;
         let ads_total =
-            (ads_attr_header_size as u32 + ads_name_bytes as u32 + ads_content_size + 7) & !7;
+            (u32::from(ads_attr_header_size) + ads_name_bytes as u32 + ads_content_size + 7) & !7;
 
         if off + ads_total as usize + 8 <= entry_data.len() {
             entry_data[off..off + 4].copy_from_slice(&0x80u32.to_le_bytes()); // $DATA type
@@ -906,7 +906,7 @@ mod tests {
 
             let end_off = off + ads_total as usize;
             if end_off + 4 <= entry_data.len() {
-                entry_data[end_off..end_off + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+                entry_data[end_off..end_off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
             }
 
             // Update bytes used
@@ -974,7 +974,7 @@ mod tests {
         buf[off + 20..off + 22].copy_from_slice(&24u16.to_le_bytes());
 
         let end_off = off + si_aligned as usize;
-        buf[end_off..end_off + 4].copy_from_slice(&0xFFFFFFFFu32.to_le_bytes());
+        buf[end_off..end_off + 4].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         let mft_data = MftData::parse(&buf).unwrap();
         // Entry without $FILE_NAME should be skipped (line 104-105)
@@ -1030,7 +1030,7 @@ mod tests {
         buf[510..512].copy_from_slice(&marker.to_le_bytes());
         buf[1022..1024].copy_from_slice(&marker.to_le_bytes());
 
-        // Write an end-of-attributes marker (0xFFFFFFFF) at first_attribute_offset
+        // Write an end-of-attributes marker (0xFFFF_FFFF) at first_attribute_offset
         buf[0x38..0x3C].copy_from_slice(&0xFFFF_FFFFu32.to_le_bytes());
 
         buf
@@ -1100,7 +1100,7 @@ mod tests {
     }
 
     /// Append an UNNAMED `$DATA` attribute (resident or non-resident) to a fresh
-    /// MFT record, so MftData::parse extracts a file_size from it.
+    /// MFT record, so `MftData::parse` extracts a `file_size` from it.
     fn entry_with_unnamed_data(
         entry_num: u32,
         name: &str,

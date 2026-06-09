@@ -212,12 +212,12 @@ mod tests {
         let mut buf = vec![0u8; aligned_len];
         buf[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
         buf[4..6].copy_from_slice(&2u16.to_le_bytes());
-        let file_ref = entry | ((seq as u64) << 48);
+        let file_ref = entry | (u64::from(seq) << 48);
         buf[0x08..0x10].copy_from_slice(&file_ref.to_le_bytes());
-        let parent_ref = parent | ((parent_seq as u64) << 48);
+        let parent_ref = parent | (u64::from(parent_seq) << 48);
         buf[0x10..0x18].copy_from_slice(&parent_ref.to_le_bytes());
         buf[0x18..0x20].copy_from_slice(&100i64.to_le_bytes());
-        let ts: i64 = 133500480000000000;
+        let ts: i64 = 133_500_480_000_000_000;
         buf[0x20..0x28].copy_from_slice(&ts.to_le_bytes());
         buf[0x28..0x2C].copy_from_slice(&reason.to_le_bytes());
         buf[0x34..0x38].copy_from_slice(&0x20u32.to_le_bytes());
@@ -235,7 +235,7 @@ mod tests {
         let r = build_v2_record_bytes(100, 1, 5, 5, 0x100, "test.txt");
         let cursor = Cursor::new(r);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "test.txt");
     }
@@ -246,7 +246,7 @@ mod tests {
         data.extend_from_slice(&build_v2_record_bytes(100, 1, 5, 5, 0x100, "found.txt"));
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "found.txt");
     }
@@ -259,7 +259,7 @@ mod tests {
         data.extend_from_slice(&build_v2_record_bytes(300, 1, 100, 1, 0x100, "c.txt"));
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 3);
     }
 
@@ -267,7 +267,7 @@ mod tests {
     fn test_streaming_reader_empty_data() {
         let cursor = Cursor::new(Vec::<u8>::new());
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 0);
     }
 
@@ -276,7 +276,7 @@ mod tests {
         let data = vec![0u8; 4096];
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 0);
     }
 
@@ -285,7 +285,7 @@ mod tests {
         let data = build_v2_record_bytes(100, 1, 5, 5, 0x8000_0000, "closed.txt");
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].reason, UsnReason::CLOSE);
     }
@@ -300,7 +300,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 0);
     }
 
@@ -317,7 +317,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "valid.txt");
     }
@@ -331,7 +331,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 0);
     }
 
@@ -345,10 +345,10 @@ mod tests {
         buf[0..4].copy_from_slice(&(record_len as u32).to_le_bytes());
         buf[4..6].copy_from_slice(&3u16.to_le_bytes());
         buf[6..8].copy_from_slice(&0u16.to_le_bytes());
-        buf[0x08..0x18].copy_from_slice(&(entry as u128).to_le_bytes());
-        buf[0x18..0x28].copy_from_slice(&(parent as u128).to_le_bytes());
+        buf[0x08..0x18].copy_from_slice(&u128::from(entry).to_le_bytes());
+        buf[0x18..0x28].copy_from_slice(&u128::from(parent).to_le_bytes());
         buf[0x28..0x30].copy_from_slice(&200i64.to_le_bytes());
-        let ts: i64 = 133500480000000000;
+        let ts: i64 = 133_500_480_000_000_000;
         buf[0x30..0x38].copy_from_slice(&ts.to_le_bytes());
         buf[0x38..0x3C].copy_from_slice(&reason.to_le_bytes());
         buf[0x44..0x48].copy_from_slice(&0x20u32.to_le_bytes());
@@ -366,7 +366,7 @@ mod tests {
         let data = build_v3_record_bytes(100, 5, 0x100, "v3file.txt");
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "v3file.txt");
         assert_eq!(records[0].major_version, 3);
@@ -377,7 +377,7 @@ mod tests {
         let data = build_v3_record_bytes(100, 5, 0x8000_0000, "closed_v3.txt");
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].reason, UsnReason::CLOSE);
     }
@@ -390,7 +390,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "deep.txt");
     }
@@ -401,7 +401,7 @@ mod tests {
         let record = build_v2_record_bytes(42, 3, 5, 5, 0x100, "buffer_test.txt");
         let cursor = Cursor::new(record);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].mft_entry, 42);
         assert_eq!(records[0].mft_sequence, 3);
@@ -416,7 +416,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 0);
     }
 
@@ -429,7 +429,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), 3);
         assert_eq!(records[0].major_version, 2);
         assert_eq!(records[1].major_version, 3);
@@ -484,7 +484,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         // Should find all records from both sides of the buffer boundary
         assert!(records.len() >= num_records_to_fill + 5);
     }
@@ -530,7 +530,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         // The last record "boundary.txt" should be found
         assert!(records.iter().any(|r| r.filename == "boundary.txt"));
     }
@@ -573,7 +573,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         // The straddling record should be found
         assert!(records.iter().any(|r| r.filename == "straddle.txt"));
     }
@@ -597,7 +597,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
         assert_eq!(records.len(), total_records);
     }
 
@@ -636,8 +636,8 @@ mod tests {
     }
 
     /// A reader that returns data in tiny chunks, simulating slow/partial reads.
-    /// After all data is consumed, read() returns 0 (EOF), which triggers
-    /// lines 61-62 (self.done = true; return Ok(self.buf_len > 0)).
+    /// After all data is consumed, `read()` returns 0 (EOF), which triggers
+    /// lines 61-62 (self.done = true; return `Ok(self.buf_len` > 0)).
     struct TinyChunkReader {
         data: Vec<u8>,
         pos: u64,
@@ -842,7 +842,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "after_bad_v2.txt");
@@ -873,7 +873,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "after_bad_v3.txt");
@@ -896,7 +896,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
 
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].filename, "after_many_zeros.txt");
@@ -911,7 +911,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
 
         assert_eq!(records.len(), 0);
     }
@@ -956,7 +956,7 @@ mod tests {
 
         let cursor = Cursor::new(data);
         let reader = UsnJournalReader::new(cursor).unwrap();
-        let records: Vec<_> = reader.filter_map(|r| r.ok()).collect();
+        let records: Vec<_> = reader.filter_map(std::result::Result::ok).collect();
 
         // Should have found the fill records but skipped the truncated one
         assert!(records.len() >= records_to_fill);

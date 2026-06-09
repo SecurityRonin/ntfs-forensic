@@ -279,10 +279,10 @@ mod tests {
         // Minor version = 0
         buf[6..8].copy_from_slice(&0u16.to_le_bytes());
         // File reference
-        let file_ref = entry | ((seq as u64) << 48);
+        let file_ref = entry | (u64::from(seq) << 48);
         buf[0x08..0x10].copy_from_slice(&file_ref.to_le_bytes());
         // Parent reference
-        let parent_ref = parent_entry | ((parent_seq as u64) << 48);
+        let parent_ref = parent_entry | (u64::from(parent_seq) << 48);
         buf[0x10..0x18].copy_from_slice(&parent_ref.to_le_bytes());
         // USN
         buf[0x18..0x20].copy_from_slice(&100i64.to_le_bytes());

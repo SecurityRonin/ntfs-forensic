@@ -192,7 +192,7 @@ mod tests {
     use crate::usn::{FileAttributes, UsnReason, UsnRecord};
     use chrono::DateTime;
 
-    /// Helper: build a UsnRecord with major_version 3 for testing.
+    /// Helper: build a `UsnRecord` with `major_version` 3 for testing.
     fn make_v3_record(
         mft_entry: u64,
         parent_mft_entry: u64,
@@ -205,7 +205,7 @@ mod tests {
             parent_mft_entry,
             parent_mft_sequence: 0,
             usn: 1000,
-            timestamp: DateTime::from_timestamp(1700000000, 0).unwrap(),
+            timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             reason,
             filename: filename.to_string(),
             file_attributes: FileAttributes::from_bits_retain(0x20), // ARCHIVE
@@ -316,8 +316,8 @@ mod tests {
         let groups = analyzer.group_by_file_id();
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups.get(&file_id_a).map(|v| v.len()), Some(2));
-        assert_eq!(groups.get(&file_id_b).map(|v| v.len()), Some(1));
+        assert_eq!(groups.get(&file_id_a).map(std::vec::Vec::len), Some(2));
+        assert_eq!(groups.get(&file_id_b).map(std::vec::Vec::len), Some(1));
 
         // Verify the grouped records have the right filenames
         let a_records = groups.get(&file_id_a).unwrap();
@@ -358,12 +358,12 @@ mod tests {
 
         // The file should be resolvable to its full path
         assert_eq!(
-            paths.get(&file_id).map(|s| s.as_str()),
+            paths.get(&file_id).map(std::string::String::as_str),
             Some("Documents\\report.docx")
         );
 
         // The directory itself should be resolvable
-        assert_eq!(paths.get(&docs_id).map(|s| s.as_str()), Some("Documents"));
+        assert_eq!(paths.get(&docs_id).map(std::string::String::as_str), Some("Documents"));
 
         // Root should not appear in reconstructed paths (it's the anchor)
         assert!(!paths.contains_key(&root_id));
@@ -435,7 +435,7 @@ mod tests {
 
         let analyzer = RefsAnalyzer::new(vec![root_record.clone()]);
         let paths = analyzer.reconstruct_paths();
-        assert_eq!(paths.get(&root_id).map(|s| s.as_str()), Some("root_dir"));
+        assert_eq!(paths.get(&root_id).map(std::string::String::as_str), Some("root_dir"));
     }
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
         let paths = analyzer.reconstruct_paths();
         // The orphan should still get a path (just its own name)
         assert_eq!(
-            paths.get(&orphan_id).map(|s| s.as_str()),
+            paths.get(&orphan_id).map(std::string::String::as_str),
             Some("orphan.txt")
         );
     }
@@ -490,11 +490,11 @@ mod tests {
         let paths = analyzer.reconstruct_paths();
 
         assert_eq!(
-            paths.get(&id_a).map(|s| s.as_str()),
+            paths.get(&id_a).map(std::string::String::as_str),
             Some("topdir\\subdir\\file.txt")
         );
-        assert_eq!(paths.get(&id_b).map(|s| s.as_str()), Some("topdir\\subdir"));
-        assert_eq!(paths.get(&id_c).map(|s| s.as_str()), Some("topdir"));
+        assert_eq!(paths.get(&id_b).map(std::string::String::as_str), Some("topdir\\subdir"));
+        assert_eq!(paths.get(&id_c).map(std::string::String::as_str), Some("topdir"));
     }
 
     #[test]
@@ -506,7 +506,7 @@ mod tests {
             parent_mft_entry: 5,
             parent_mft_sequence: 0,
             usn: 1000,
-            timestamp: DateTime::from_timestamp(1700000000, 0).unwrap(),
+            timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             reason: UsnReason::FILE_CREATE,
             filename: "v2file.txt".to_string(),
             file_attributes: FileAttributes::from_bits_retain(0x20),
@@ -558,8 +558,8 @@ mod tests {
         let paths = analyzer.reconstruct_paths();
 
         // A should resolve to dir_b\file_a
-        assert_eq!(paths.get(&id_a).map(|s| s.as_str()), Some("dir_b\\file_a"));
+        assert_eq!(paths.get(&id_a).map(std::string::String::as_str), Some("dir_b\\file_a"));
         // B should resolve to dir_b
-        assert_eq!(paths.get(&id_b).map(|s| s.as_str()), Some("dir_b"));
+        assert_eq!(paths.get(&id_b).map(std::string::String::as_str), Some("dir_b"));
     }
 }

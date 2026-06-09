@@ -7,7 +7,7 @@
 [![CI](https://github.com/SecurityRonin/ntfs-forensic/actions/workflows/ci.yml/badge.svg)](https://github.com/SecurityRonin/ntfs-forensic/actions)
 [![Sponsor](https://img.shields.io/badge/sponsor-h4x0r-ea4aaa?logo=github-sponsors)](https://github.com/sponsors/h4x0r)
 
-**A from-scratch, forensic-grade NTFS reader — `$MFT`, attributes, indexes, data runs, named streams, and LZNT1 over any `Read + Seek` source. No `unsafe`, no C bindings.**
+**A from-scratch, forensic-grade NTFS reader — `$MFT`, attributes, indexes, data runs, named streams, LZNT1, and `$UsnJrnl:$J` change-journal records over any `Read + Seek` source. No `unsafe`, no C bindings.**
 
 ```toml
 [dependencies]
@@ -37,7 +37,7 @@ The bare crate name `ntfs` on crates.io is Colin Finck's general-purpose reader,
 
 ## What it parses
 
-`BootSector` (BPB / extended BPB) · `MftRecordHeader` + `apply_fixup` (FILE records, update-sequence-array fixup) · `parse_attributes` (resident + non-resident) · `StandardInformation` / `FileName` (both timestamp sets) · `decode_runlist` + `read_attribute_value` (data runs, sparse, non-resident) · `IndexRoot` / `parse_index_buffer` (directory `$INDEX_ROOT` / INDX) · `parse_attribute_list` (fragmented files) · `decompress` (LZNT1) · `carve_mft_entries` (`FILE`/`BAAD` carving) · `compare_mft_mirror` / `parse_logfile` (`$MFTMirr`, `$LogFile`). Open a partition inside a whole disk with the bounded `OffsetReader`, which structurally cannot read past the volume boundary.
+`BootSector` (BPB / extended BPB) · `MftRecordHeader` + `apply_fixup` (FILE records, update-sequence-array fixup) · `parse_attributes` (resident + non-resident) · `StandardInformation` / `FileName` (both timestamp sets) · `decode_runlist` + `read_attribute_value` (data runs, sparse, non-resident) · `IndexRoot` / `parse_index_buffer` (directory `$INDEX_ROOT` / INDX) · `parse_attribute_list` (fragmented files) · `decompress` (LZNT1) · `carve_mft_entries` (`FILE`/`BAAD` carving) · `compare_mft_mirror` / `parse_logfile` (`$MFTMirr`, `$LogFile`) · `parse_usn_record_v2` / `UsnRecord` / `UsnReason` (`$UsnJrnl:$J` change-journal records, V2/V3 — MFT + parent-MFT references, reason flags, filename, attributes, timestamp). Open a partition inside a whole disk with the bounded `OffsetReader`, which structurally cannot read past the volume boundary.
 
 ## Trust, but verify
 

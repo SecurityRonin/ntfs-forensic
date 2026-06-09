@@ -329,7 +329,7 @@ mod tests {
             parent_mft_entry: parent_entry,
             parent_mft_sequence: parent_seq,
             usn,
-            timestamp: DateTime::from_timestamp(1700000000, 0).unwrap(),
+            timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
             reason,
             filename: filename.to_string(),
             file_attributes: FileAttributes::ARCHIVE,

@@ -56,7 +56,7 @@ The first four come from `audit_record` / `audit_components`. The volume-level p
 
 ## The two-crate split
 
-This crate is the **analyzer**; the **reader** is [`ntfs-core`](https://crates.io/crates/ntfs-core) (`$MFT`, attributes, indexes, data runs, LZNT1, `NtfsFs` path navigation over any `Read + Seek` source). The split mirrors `vmdk-core`/`vmdk-forensic`. Together they back [`issen`](https://github.com/SecurityRonin/issen) and [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic).
+This crate is the **analyzer**; the **reader** is [`ntfs-core`](https://crates.io/crates/ntfs-core) (`$MFT`, attributes, indexes, data runs, LZNT1, `$UsnJrnl:$J` change-journal record decode, `NtfsFs` path navigation over any `Read + Seek` source). The split mirrors `vmdk-core`/`vmdk-forensic`. Together they back [`issen`](https://github.com/SecurityRonin/issen) and [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic).
 
 ## Trust, but verify
 
