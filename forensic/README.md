@@ -54,9 +54,20 @@ The first four come from `audit_record` / `audit_components`. The volume-level p
 - `is_deleted(header)` → record not currently allocated
 - `carve_file_records(mft, record_size)` → offsets of `FILE`/`BAAD` records in a raw `$MFT` region
 
+## `$UsnJrnl:$J` change-journal analysis
+
+Beyond MFT-record anomalies, this crate analyses the USN change journal (decoded by `ntfs-core`):
+
+- `rules` — a configurable rule engine (`RuleSet` / `Rule`, glob + regex filename and reason-flag matching) whose hits convert to graded `report::Finding`s via `RuleMatch::to_finding`.
+- `analysis` — pattern detectors for secure deletion (SDelete / cipher), USN-journal clearing, ransomware, and timestomping.
+- `correlation` — cross-references USN ↔ `$LogFile` ↔ `$MFT` to surface ghost records, coverage gaps, entry reuse, and timestamp conflicts.
+- `triage` — a `TriageEngine` with 12 built-in investigative questions over reconstructed records.
+
+These power the thin [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic) CLI, which adds output formats (JSON / CSV / SQLite / TLN / body) and live monitoring on top.
+
 ## The two-crate split
 
-This crate is the **analyzer**; the **reader** is [`ntfs-core`](https://crates.io/crates/ntfs-core) (`$MFT`, attributes, indexes, data runs, LZNT1, `$UsnJrnl:$J` change-journal record decode, `NtfsFs` path navigation over any `Read + Seek` source). The split mirrors `vmdk-core`/`vmdk-forensic`. Together they back [`issen`](https://github.com/SecurityRonin/issen) and [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic).
+This crate is the **analyzer**; the **reader** is [`ntfs-core`](https://crates.io/crates/ntfs-core) (`$MFT`, attributes, indexes, data runs, LZNT1, the full `$UsnJrnl:$J` reader stack — streaming reader, carver, `RewindEngine` path reconstruction, `MftData` — and `NtfsFs` path navigation over any `Read + Seek` source). The split mirrors `vmdk-core`/`vmdk-forensic`. Together they back [`issen`](https://github.com/SecurityRonin/issen) and [`usnjrnl-forensic`](https://github.com/SecurityRonin/usnjrnl-forensic).
 
 ## Trust, but verify
 

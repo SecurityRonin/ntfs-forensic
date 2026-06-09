@@ -37,7 +37,18 @@ The bare crate name `ntfs` on crates.io is Colin Finck's general-purpose reader,
 
 ## What it parses
 
-`BootSector` (BPB / extended BPB) · `MftRecordHeader` + `apply_fixup` (FILE records, update-sequence-array fixup) · `parse_attributes` (resident + non-resident) · `StandardInformation` / `FileName` (both timestamp sets) · `decode_runlist` + `read_attribute_value` (data runs, sparse, non-resident) · `IndexRoot` / `parse_index_buffer` (directory `$INDEX_ROOT` / INDX) · `parse_attribute_list` (fragmented files) · `decompress` (LZNT1) · `carve_mft_entries` (`FILE`/`BAAD` carving) · `compare_mft_mirror` / `parse_logfile` (`$MFTMirr`, `$LogFile`) · `parse_usn_record_v2` / `UsnRecord` / `UsnReason` (`$UsnJrnl:$J` change-journal records, V2/V3 — MFT + parent-MFT references, reason flags, filename, attributes, timestamp). Open a partition inside a whole disk with the bounded `OffsetReader`, which structurally cannot read past the volume boundary.
+`BootSector` (BPB / extended BPB) · `MftRecordHeader` + `apply_fixup` (FILE records, update-sequence-array fixup) · `parse_attributes` (resident + non-resident) · `StandardInformation` / `FileName` (both timestamp sets) · `decode_runlist` + `read_attribute_value` (data runs, sparse, non-resident) · `IndexRoot` / `parse_index_buffer` (directory `$INDEX_ROOT` / INDX) · `parse_attribute_list` (fragmented files) · `decompress` (LZNT1) · `carve_mft_entries` (`FILE`/`BAAD` carving) · `compare_mft_mirror` / `parse_logfile` (`$MFTMirr`, `$LogFile`). Open a partition inside a whole disk with the bounded `OffsetReader`, which structurally cannot read past the volume boundary.
+
+### `$UsnJrnl:$J` change journal
+
+A full change-journal reader, not just a record decoder:
+
+- `parse_usn_record_v2` / `parse_usn_record_v3` / `parse_usn_journal` · `UsnRecord` / `UsnReason` / `FileAttributes` — decode V2/V3 records (MFT + parent-MFT references, reason flags, filename, attributes, timestamp).
+- `UsnJournalReader` — streaming, low-memory iterator over a `$J` stream too large to load whole.
+- `carve_usn_records` — recover USN records from free space and corrupt journals (V2/V3, timestamp-range gated).
+- `RewindEngine` — CyberCX two-phase (reverse + forward) **full-path reconstruction** with rename / MFT-reuse handling.
+- `MftData` / `MftEntry` — high-level `$MFT` aggregator (`$SI`/`$FN` timestamps, ADS, path resolution) that seeds the `RewindEngine`.
+- `RefsAnalyzer` / `RefsFileId` — ReFS USN V3 support (128-bit file IDs, journal-rewind-only path reconstruction).
 
 ## Trust, but verify
 

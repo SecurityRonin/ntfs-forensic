@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [ntfs-core 0.7.0 / ntfs-forensic 0.6.0] — 2026-06-09
+
+Absorbed `usnjrnl-forensic`'s intelligence: all USN-journal reader logic moved
+into `ntfs-core`, all USN findings logic into `ntfs-forensic`. `usnjrnl-forensic`
+is now a thin CLI shell over these two crates.
+
+### Added — `ntfs-core` (reader)
+
+- `refs` — ReFS USN V3 support: `RefsFileId` (128-bit), `RefsRecord`,
+  `RefsAnalyzer` (volume detection, file-id grouping, journal-rewind path
+  reconstruction).
+- `usn::reader::UsnJournalReader` — streaming, low-memory `$UsnJrnl:$J` iterator
+  over any `Read + Seek`.
+- `usn::carver::carve_usn_records` — free-space USN record carver (V2/V3,
+  timestamp-range gated).
+- `rewind::RewindEngine` — CyberCX two-phase (reverse + forward) full-path
+  reconstruction with rename/MFT-reuse handling.
+- `mft::MftData` / `mft::MftEntry` — high-level `$MFT` aggregator with `$SI`/`$FN`
+  timestamps, ADS detection, path resolution, and a `RewindEngine` seed.
+
+### Added — `ntfs-forensic` (analyzer)
+
+- `rules` — USN rule engine (`RuleSet`/`Rule`) emitting graded
+  `report::Finding`s via `RuleMatch::to_finding`.
+- `analysis` — secure-deletion (SDelete/cipher), USN-journal-clearing,
+  ransomware, and timestomping pattern detectors.
+- `correlation` — USN ↔ `$LogFile` ↔ `$MFT` correlation: ghost records,
+  coverage gaps, entry reuse, timestamp conflicts.
+- `triage` — `TriageEngine` plus 12 built-in investigative questions.
+
 ## [0.2.0] — 2026-06-07
 
 ### Added
