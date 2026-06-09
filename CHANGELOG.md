@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Feature `$UsnJrnl:$J` full-path reconstruction (the *Rewind* engine) as the
   headline capability, with a worked example, and credit the technique's
-  originator, [CyberCX](https://cybercx.com.au/blog/ntfs-usnjrnl-rewind/)
+  originator, [CyberCX](https://cybercx.com/blog/ntfs-usnjrnl-rewind/)
   ([`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind)).
   Docs-only; no code change.
 

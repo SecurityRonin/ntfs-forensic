@@ -132,7 +132,7 @@ for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
 
 `RewindEngine` runs **two passes — reverse, then forward** — so a rename or an MFT-entry reuse part-way through the journal resolves to the *correct* path at each point in time. Events whose parent is no longer present in the live `$MFT` still resolve from the journal's own create/rename history, tagged `RecordSource::Carved` or `Ghost`. For journals too large to hold in memory, `UsnJournalReader` streams them; `carve_usn_records` recovers events from journal slack and unallocated space; and `RefsAnalyzer` handles ReFS's 128-bit USN V3 references.
 
-> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by **CyberCX** — see their writeup [*NTFS Usnjrnl Rewind*](https://cybercx.com.au/blog/ntfs-usnjrnl-rewind/) (April 2024) and the reference tool [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind). This is an independent, clean-room Rust implementation built on `ntfs-core`'s own parsers; its SQLite export is column-compatible with `usnjrnl_rewind`.
+> **Credit:** the journal-`$J` path-reconstruction technique was pioneered by **CyberCX** — see their writeup [*NTFS Usnjrnl Rewind*](https://cybercx.com/blog/ntfs-usnjrnl-rewind/) (April 2024) and the reference tool [`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind). This is an independent, clean-room Rust implementation built on `ntfs-core`'s own parsers; its SQLite export is column-compatible with `usnjrnl_rewind`.
 
 ## Reader API (`ntfs-core`)
 
