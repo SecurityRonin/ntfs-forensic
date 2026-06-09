@@ -1,0 +1,417 @@
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use chrono::DateTime;
+    use ntfs_core::usn::{FileAttributes, UsnReason, UsnRecord};
+
+    /// Helper: build a minimal `UsnRecord` for testing.
+    fn make_record(filename: &str, reason: UsnReason) -> UsnRecord {
+        UsnRecord {
+            mft_entry: 1,
+            mft_sequence: 1,
+            parent_mft_entry: 5,
+            parent_mft_sequence: 1,
+            usn: 0,
+            timestamp: DateTime::from_timestamp(1_700_000_000, 0).unwrap(),
+            reason,
+            filename: filename.to_string(),
+            file_attributes: FileAttributes::from_bits_retain(0x20),
+            source_info: 0,
+            security_id: 0,
+            major_version: 2,
+        }
+    }
+
+    // ── Filename matching ───────────────────────────────────────────────
+
+    #[test]
+    fn test_rule_matches_filename_glob() {
+        let rule = Rule {
+            name: "exe_files".into(),
+            description: "Detect executables".into(),
+            severity: Severity::Medium,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("malware.exe", UsnReason::FILE_CREATE);
+        let miss = make_record("readme.txt", UsnReason::FILE_CREATE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    #[test]
+    fn test_rule_matches_filename_regex() {
+        let rule = Rule {
+            name: "exact_cmd".into(),
+            description: "Exact cmd.exe".into(),
+            severity: Severity::High,
+            filename_match: Some(FilenameMatch::Regex(r"^cmd\.exe$".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("cmd.exe", UsnReason::FILE_CREATE);
+        let miss = make_record("xcmd.exe", UsnReason::FILE_CREATE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    #[test]
+    fn test_rule_matches_extension() {
+        let rule = Rule {
+            name: "ps1".into(),
+            description: "PowerShell scripts".into(),
+            severity: Severity::Medium,
+            filename_match: Some(FilenameMatch::Extension(".ps1".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("invoke-mimikatz.ps1", UsnReason::FILE_CREATE);
+        let miss = make_record("readme.txt", UsnReason::FILE_CREATE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    // ── Reason-flag matching ────────────────────────────────────────────
+
+    #[test]
+    fn test_rule_matches_reason_flags() {
+        let rule = Rule {
+            name: "created".into(),
+            description: "File created".into(),
+            severity: Severity::Info,
+            filename_match: None,
+            exclude_pattern: None,
+            any_reasons: Some(UsnReason::FILE_CREATE),
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("anything.txt", UsnReason::FILE_CREATE);
+        let miss = make_record("anything.txt", UsnReason::FILE_DELETE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    #[test]
+    fn test_rule_matches_reason_any() {
+        let rule = Rule {
+            name: "create_or_delete".into(),
+            description: "Created or deleted".into(),
+            severity: Severity::Low,
+            filename_match: None,
+            exclude_pattern: None,
+            any_reasons: Some(UsnReason::FILE_CREATE | UsnReason::FILE_DELETE),
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit1 = make_record("a.txt", UsnReason::FILE_CREATE);
+        let hit2 = make_record("b.txt", UsnReason::FILE_DELETE);
+        let miss = make_record("c.txt", UsnReason::DATA_OVERWRITE);
+
+        assert_eq!(ruleset.evaluate(&hit1).len(), 1);
+        assert_eq!(ruleset.evaluate(&hit2).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    #[test]
+    fn test_rule_matches_reason_all() {
+        let rule = Rule {
+            name: "create_and_close".into(),
+            description: "Created and closed".into(),
+            severity: Severity::Low,
+            filename_match: None,
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: Some(UsnReason::FILE_CREATE | UsnReason::CLOSE),
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("a.txt", UsnReason::FILE_CREATE | UsnReason::CLOSE);
+        let miss = make_record("b.txt", UsnReason::FILE_CREATE); // missing CLOSE
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss).len(), 0);
+    }
+
+    // ── Combined conditions ─────────────────────────────────────────────
+
+    #[test]
+    fn test_rule_combined_conditions() {
+        let rule = Rule {
+            name: "exe_created".into(),
+            description: "Executable created".into(),
+            severity: Severity::High,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: None,
+            any_reasons: Some(UsnReason::FILE_CREATE),
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("bad.exe", UsnReason::FILE_CREATE);
+        let miss_name = make_record("bad.txt", UsnReason::FILE_CREATE);
+        let miss_reason = make_record("bad.exe", UsnReason::FILE_DELETE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&miss_name).len(), 0);
+        assert_eq!(ruleset.evaluate(&miss_reason).len(), 0);
+    }
+
+    // ── Negation / exclude ──────────────────────────────────────────────
+
+    #[test]
+    fn test_rule_negation() {
+        let rule = Rule {
+            name: "exe_not_svchost".into(),
+            description: "Executables except svchost".into(),
+            severity: Severity::Medium,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: Some("svchost*".into()),
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let hit = make_record("malware.exe", UsnReason::FILE_CREATE);
+        let excluded = make_record("svchost.exe", UsnReason::FILE_CREATE);
+
+        assert_eq!(ruleset.evaluate(&hit).len(), 1);
+        assert_eq!(ruleset.evaluate(&excluded).len(), 0);
+    }
+
+    // ── RuleSet tests ───────────────────────────────────────────────────
+
+    #[test]
+    fn test_ruleset_evaluates_all_rules() {
+        let rules = vec![
+            Rule {
+                name: "rule_a".into(),
+                description: "A".into(),
+                severity: Severity::Low,
+                filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+                exclude_pattern: None,
+                any_reasons: None,
+                all_reasons: None,
+            },
+            Rule {
+                name: "rule_b".into(),
+                description: "B".into(),
+                severity: Severity::Medium,
+                filename_match: Some(FilenameMatch::Extension(".exe".into())),
+                exclude_pattern: None,
+                any_reasons: None,
+                all_reasons: None,
+            },
+            Rule {
+                name: "rule_c".into(),
+                description: "C".into(),
+                severity: Severity::High,
+                filename_match: None,
+                exclude_pattern: None,
+                any_reasons: Some(UsnReason::FILE_CREATE),
+                all_reasons: None,
+            },
+        ];
+        let ruleset = RuleSet::from_rules(rules);
+
+        let rec = make_record("evil.exe", UsnReason::FILE_CREATE);
+        let matches = ruleset.evaluate(&rec);
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn test_ruleset_returns_rule_name_and_severity() {
+        let rule = Rule {
+            name: "test_rule".into(),
+            description: "A test".into(),
+            severity: Severity::Critical,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let rec = make_record("payload.exe", UsnReason::FILE_CREATE);
+        let matches = ruleset.evaluate(&rec);
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].rule_name, "test_rule");
+        assert_eq!(matches[0].severity, Severity::Critical);
+        assert_eq!(matches[0].description, "A test");
+    }
+
+    #[test]
+    fn rule_match_converts_to_a_canonical_finding() {
+        let rule = Rule {
+            name: "suspicious_extension".into(),
+            description: "double extension".into(),
+            severity: Severity::High,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+        let rec = make_record("invoice.pdf.exe", UsnReason::FILE_CREATE);
+        let m = &ruleset.evaluate(&rec)[0];
+        let f = m.to_finding(forensicnomicon::report::Source {
+            analyzer: "usnjrnl-forensic".to_string(),
+            scope: "$UsnJrnl".to_string(),
+            version: None,
+        });
+        assert_eq!(f.code, "USN-SUSPICIOUS-EXTENSION");
+        assert_eq!(f.severity, Some(Severity::High));
+        assert!(f.evidence.iter().any(|e| e.field == "filename"));
+    }
+
+    #[test]
+    fn test_rule_no_match_returns_empty() {
+        let rule = Rule {
+            name: "exe_only".into(),
+            description: "Only exe".into(),
+            severity: Severity::Medium,
+            filename_match: Some(FilenameMatch::Glob("*.exe".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let rec = make_record("safe.docx", UsnReason::DATA_OVERWRITE);
+        assert!(ruleset.evaluate(&rec).is_empty());
+    }
+
+    // ── Built-in rules ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_glob_matches_trailing_stars() {
+        // Test line 96: the while loop that skips trailing '*' in pattern
+        // after text has been fully consumed
+        assert!(glob_matches("test***", "test"));
+        assert!(glob_matches("***", ""));
+        assert!(glob_matches("a*b*", "ab"));
+        assert!(!glob_matches("a*b*c", "ab"));
+    }
+
+    #[test]
+    fn test_rule_regex_compile_failure() {
+        // Test line 122: regex pattern that fails to compile returns false
+        let rule = Rule {
+            name: "bad_regex".into(),
+            description: "Invalid regex".into(),
+            severity: Severity::Low,
+            filename_match: Some(FilenameMatch::Regex("[invalid regex".into())),
+            exclude_pattern: None,
+            any_reasons: None,
+            all_reasons: None,
+        };
+        let ruleset = RuleSet::from_rules(vec![rule]);
+
+        let rec = make_record("anything.txt", UsnReason::FILE_CREATE);
+        // Should not panic, and should not match
+        assert_eq!(ruleset.evaluate(&rec).len(), 0);
+    }
+
+    #[test]
+    fn test_builtin_suspicious_executables() {
+        let ruleset = RuleSet::with_builtins();
+
+        for name in &[
+            "psexec.exe",
+            "PsExec64.exe",
+            "mimikatz.exe",
+            "procdump.exe",
+            "lazagne.exe",
+        ] {
+            let rec = make_record(name, UsnReason::FILE_CREATE);
+            let matches = ruleset.evaluate(&rec);
+            let hit = matches
+                .iter()
+                .any(|m| m.rule_name == "suspicious_executables");
+            assert!(hit);
+        }
+
+        let safe = make_record("notepad.exe", UsnReason::FILE_CREATE);
+        let matches = ruleset.evaluate(&safe);
+        let hit = matches
+            .iter()
+            .any(|m| m.rule_name == "suspicious_executables");
+        assert!(!hit);
+    }
+
+    #[test]
+    fn test_builtin_ransomware_extensions() {
+        let ruleset = RuleSet::with_builtins();
+
+        for name in &[
+            "document.encrypted",
+            "photo.locked",
+            "data.crypto",
+            "file.crypt",
+            "report.enc",
+            "budget.pay",
+            "backup.ransom",
+        ] {
+            let rec = make_record(name, UsnReason::RENAME_NEW_NAME);
+            let matches = ruleset.evaluate(&rec);
+            let hit = matches
+                .iter()
+                .any(|m| m.rule_name == "ransomware_extensions");
+            assert!(hit);
+        }
+
+        let safe = make_record("report.pdf", UsnReason::RENAME_NEW_NAME);
+        let matches = ruleset.evaluate(&safe);
+        let hit = matches
+            .iter()
+            .any(|m| m.rule_name == "ransomware_extensions");
+        assert!(!hit);
+    }
+
+    #[test]
+    fn test_builtin_secure_delete() {
+        let ruleset = RuleSet::with_builtins();
+
+        for name in &["AAAAAAAAAAAA.txt", "BBBBBBBB.dat", "ZZZZZZZZZZ.bin"] {
+            let rec = make_record(name, UsnReason::RENAME_NEW_NAME);
+            let matches = ruleset.evaluate(&rec);
+            let hit = matches
+                .iter()
+                .any(|m| m.rule_name == "secure_delete_pattern");
+            assert!(hit);
+        }
+
+        let safe = make_record("ABCDEF.txt", UsnReason::RENAME_NEW_NAME);
+        let matches = ruleset.evaluate(&safe);
+        let hit = matches
+            .iter()
+            .any(|m| m.rule_name == "secure_delete_pattern");
+        assert!(!hit);
+    }
+
+    #[test]
+    fn test_ruleset_default() {
+        // Cover lines 157-158: Default impl for RuleSet.
+        let ruleset = RuleSet::default();
+        // Default-constructed ruleset should be empty and match nothing.
+        let record = make_record("test.txt", UsnReason::FILE_CREATE);
+        let matches = ruleset.evaluate(&record);
+        assert!(matches.is_empty());
+    }
+}
