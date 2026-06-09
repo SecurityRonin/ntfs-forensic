@@ -7,6 +7,262 @@
 //! entries whose `$SI` timestamps predate their `$FN` timestamps; grading that
 //! signal into a finding is left to the analyzer layer.
 
+use std::collections::HashMap;
+
+use chrono::{DateTime, Utc};
+
+use crate::error::Result;
+use crate::rewind::{EntryKey, RewindEngine};
+use crate::{
+    apply_fixup, parse_attributes, AttributeBody, FileName, Filetime, MftRecordHeader,
+    StandardInformation,
+};
+
+/// Parsed MFT entry with fields relevant to USN Journal correlation.
+#[derive(Debug, Clone)]
+pub struct MftEntry {
+    pub entry_number: u64,
+    pub sequence_number: u16,
+    pub filename: String,
+    pub parent_entry: u64,
+    pub parent_sequence: u16,
+    pub is_directory: bool,
+    pub is_in_use: bool,
+    /// `$STANDARD_INFORMATION` timestamps (user-modifiable).
+    pub si_created: Option<DateTime<Utc>>,
+    pub si_modified: Option<DateTime<Utc>>,
+    pub si_mft_modified: Option<DateTime<Utc>>,
+    pub si_accessed: Option<DateTime<Utc>>,
+    /// `$FILE_NAME` timestamps (harder to modify, more trustworthy).
+    pub fn_created: Option<DateTime<Utc>>,
+    pub fn_modified: Option<DateTime<Utc>>,
+    pub fn_mft_modified: Option<DateTime<Utc>>,
+    pub fn_accessed: Option<DateTime<Utc>>,
+    /// Full path resolved from MFT parent chain.
+    pub full_path: String,
+    /// File size from `$DATA` attribute.
+    pub file_size: u64,
+    /// Whether this entry has alternate data streams.
+    pub has_ads: bool,
+}
+
+/// Parsed `$MFT` data for correlation.
+pub struct MftData {
+    /// All parsed entries.
+    pub entries: Vec<MftEntry>,
+    /// Map: `entry_number` -> index in entries vec (for current allocation).
+    pub by_entry: HashMap<u64, usize>,
+    /// Map: (entry, sequence) -> index (sequence-aware lookup).
+    pub by_key: HashMap<EntryKey, usize>,
+}
+
+impl MftData {
+    /// Parse raw `$MFT` data.
+    ///
+    /// # Errors
+    ///
+    /// Currently infallible — malformed records are skipped rather than
+    /// surfaced as errors — but the signature is fallible to leave room for
+    /// future fatal conditions.
+    pub fn parse(data: &[u8]) -> Result<Self> {
+        const REC: usize = 1024;
+        let mut entries = Vec::new();
+        let mut by_entry = HashMap::new();
+        let mut by_key = HashMap::new();
+
+        for chunk in data.chunks(REC) {
+            // Skip BAAD/zeroed/short trailing slots.
+            if chunk.len() < REC || chunk.get(0..4) != Some(b"FILE") {
+                continue;
+            }
+            let mut buf = chunk.to_vec();
+            if apply_fixup(&mut buf, 512).is_err() {
+                continue;
+            }
+            let Ok(header) = MftRecordHeader::parse(&buf) else {
+                continue;
+            };
+            let Ok(attrs) = parse_attributes(&buf, header.first_attribute_offset as usize) else {
+                continue;
+            };
+
+            // $STANDARD_INFORMATION timestamps.
+            let (mut si_created, mut si_modified, mut si_mft_modified, mut si_accessed) =
+                (None, None, None, None);
+            for a in attrs.iter().filter(|a| a.type_code == 0x10) {
+                if let Some(si) = a
+                    .resident_content(&buf)
+                    .and_then(|c| StandardInformation::parse(c).ok())
+                {
+                    si_created = to_datetime(si.created);
+                    si_modified = to_datetime(si.modified);
+                    si_mft_modified = to_datetime(si.mft_modified);
+                    si_accessed = to_datetime(si.accessed);
+                }
+            }
+
+            // Best $FILE_NAME: prefer Win32 / Win32+DOS over DOS over POSIX.
+            let mut best: Option<(u8, FileName)> = None;
+            for a in attrs.iter().filter(|a| a.type_code == 0x30) {
+                if let Some(fnm) = a
+                    .resident_content(&buf)
+                    .and_then(|c| FileName::parse(c).ok())
+                {
+                    let priority = match fnm.namespace {
+                        1 | 3 => 3,
+                        2 => 1,
+                        _ => 2,
+                    };
+                    if best.as_ref().is_none_or(|(p, _)| priority > *p) {
+                        best = Some((priority, fnm));
+                    }
+                }
+            }
+            let Some((_, best_fn)) = best else {
+                continue;
+            };
+
+            // Alternate data streams = named $DATA. file_size = unnamed $DATA size.
+            let has_ads = attrs
+                .iter()
+                .any(|a| a.type_code == 0x80 && a.name.is_some());
+            let file_size = attrs
+                .iter()
+                .filter(|a| a.type_code == 0x80 && a.name.is_none())
+                .map(|a| match &a.body {
+                    AttributeBody::NonResident { real_size, .. } => *real_size,
+                    AttributeBody::Resident { content_length, .. } => u64::from(*content_length),
+                })
+                .next()
+                .unwrap_or(0);
+
+            let entry_number = u64::from(header.record_number);
+            let sequence_number = header.sequence_number;
+            let idx = entries.len();
+            entries.push(MftEntry {
+                entry_number,
+                sequence_number,
+                filename: best_fn.name.clone(),
+                parent_entry: best_fn.parent.record_number,
+                parent_sequence: best_fn.parent.sequence,
+                is_directory: header.is_directory(),
+                is_in_use: header.is_in_use(),
+                si_created,
+                si_modified,
+                si_mft_modified,
+                si_accessed,
+                fn_created: to_datetime(best_fn.created),
+                fn_modified: to_datetime(best_fn.modified),
+                fn_mft_modified: to_datetime(best_fn.mft_modified),
+                fn_accessed: to_datetime(best_fn.accessed),
+                full_path: String::new(),
+                file_size,
+                has_ads,
+            });
+            by_entry.insert(entry_number, idx);
+            by_key.insert(EntryKey::new(entry_number, sequence_number), idx);
+        }
+
+        // Second pass: resolve full paths once every entry is in the map.
+        let paths: Vec<String> = (0..entries.len())
+            .map(|i| resolve_full_path(&entries, &by_entry, i))
+            .collect();
+        for (entry, path) in entries.iter_mut().zip(paths) {
+            entry.full_path = path;
+        }
+
+        Ok(Self {
+            entries,
+            by_entry,
+            by_key,
+        })
+    }
+
+    /// Seed a [`RewindEngine`] with the current MFT state.
+    #[must_use]
+    pub fn seed_rewind(&self) -> RewindEngine {
+        let mft_iter = self.entries.iter().map(|e| {
+            (
+                e.entry_number,
+                e.sequence_number,
+                e.filename.clone(),
+                e.parent_entry,
+                e.parent_sequence,
+            )
+        });
+        RewindEngine::from_mft(mft_iter)
+    }
+
+    /// Detect potential timestomping: `$SI` created before `$FN` created.
+    #[must_use]
+    pub fn detect_timestomping(&self) -> Vec<&MftEntry> {
+        self.entries
+            .iter()
+            .filter(|e| {
+                if let (Some(si_c), Some(fn_c)) = (e.si_created, e.fn_created) {
+                    si_c < fn_c || {
+                        if let Some(si_m) = e.si_modified {
+                            si_m < fn_c
+                        } else {
+                            false
+                        }
+                    }
+                } else {
+                    false
+                }
+            })
+            .collect()
+    }
+
+    /// Get entry by entry number (current allocation).
+    #[must_use]
+    pub fn get_by_entry(&self, entry_number: u64) -> Option<&MftEntry> {
+        self.by_entry
+            .get(&entry_number)
+            .and_then(|&idx| self.entries.get(idx))
+    }
+
+    /// Get entry by (entry, sequence) pair.
+    #[must_use]
+    pub fn get_by_key(&self, key: &EntryKey) -> Option<&MftEntry> {
+        self.by_key.get(key).and_then(|&idx| self.entries.get(idx))
+    }
+}
+
+/// Convert an NTFS FILETIME to a chrono UTC datetime; `None` for the unset (zero) value.
+fn to_datetime(ft: Filetime) -> Option<DateTime<Utc>> {
+    if ft.is_zero() {
+        return None;
+    }
+    let secs = ft.to_unix_seconds();
+    // Sub-second remainder in [0, 1e9); rem_euclid keeps it non-negative for pre-epoch times.
+    let sub_nanos = ft.to_unix_nanos().rem_euclid(1_000_000_000);
+    let nsec = u32::try_from(sub_nanos).unwrap_or(0);
+    DateTime::from_timestamp(secs, nsec)
+}
+
+/// Resolve an entry's full path (`.\dir\file`) by walking the parent chain to the root (entry 5).
+fn resolve_full_path(entries: &[MftEntry], by_entry: &HashMap<u64, usize>, idx: usize) -> String {
+    let mut parts = Vec::new();
+    let mut cur = idx;
+    // Bound the walk so a cyclic/corrupt parent chain cannot loop forever.
+    for _ in 0..256 {
+        let Some(e) = entries.get(cur) else {
+            break;
+        };
+        parts.push(e.filename.clone());
+        if e.parent_entry == 5 || e.parent_entry == e.entry_number {
+            break;
+        }
+        match by_entry.get(&e.parent_entry) {
+            Some(&p) if p != cur => cur = p,
+            _ => break,
+        }
+    }
+    parts.reverse();
+    format!(".\\{}", parts.join("\\"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -785,7 +1041,6 @@ mod tests {
         // Cover lines 70-72: the Err(e) branch in MFT parsing.
         // Create MFT data with a valid first entry, then an entry with an
         // invalid signature that the mft crate will report as an error.
-        let _ = env_logger::builder().is_test(true).try_init();
 
         // First entry: valid FILE entry (parser reads total_entry_size from this)
         let entry0 = build_raw_mft_entry_buf(1, 0x01);

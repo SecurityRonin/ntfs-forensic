@@ -67,6 +67,7 @@ pub use file_name::{FileName, FileReference};
 pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use logfile::{detect_journal_clearing, parse_logfile, LogFileSummary, RestartArea};
+pub use mft::{MftData, MftEntry};
 pub use mftmirr::{compare_mft_mirror, MirrorComparison};
 pub use record::{apply_fixup, MftRecordHeader};
 pub use refs::{RefsAnalyzer, RefsFileId, RefsRecord};
