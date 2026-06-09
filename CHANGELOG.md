@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [ntfs-core 0.7.1 / ntfs-forensic 0.6.1] — 2026-06-09
+
+### Docs
+
+- Feature `$UsnJrnl:$J` full-path reconstruction (the *Rewind* engine) as the
+  headline capability, with a worked example, and credit the technique's
+  originator, [CyberCX](https://cybercx.com.au/blog/ntfs-usnjrnl-rewind/)
+  ([`CyberCX-DFIR/usnjrnl_rewind`](https://github.com/CyberCX-DFIR/usnjrnl_rewind)).
+  Docs-only; no code change.
+
 ## [ntfs-core 0.7.0 / ntfs-forensic 0.6.0] — 2026-06-09
 
 Absorbed `usnjrnl-forensic`'s intelligence: all USN-journal reader logic moved
