@@ -8,6 +8,7 @@
 
 mod attributes;
 mod reason;
+mod reader;
 mod record;
 
 pub use attributes::FileAttributes;
