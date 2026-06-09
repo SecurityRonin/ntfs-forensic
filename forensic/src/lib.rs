@@ -9,6 +9,7 @@
 pub mod analysis;
 pub mod correlation;
 pub mod rules;
+pub mod triage;
 
 use forensicnomicon::ntfs::{attr_types, SIGNATURE_BAAD, SIGNATURE_FILE};
 
