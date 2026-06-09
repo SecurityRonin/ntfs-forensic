@@ -4,6 +4,416 @@
 //! and detect evidence of anti-forensic activity (journal clearing,
 //! timestomping, phantom file operations).
 
+use std::collections::{HashMap, HashSet};
+
+use chrono::{DateTime, Utc};
+
+use ntfs_core::logfile::usn_extractor::LogFileUsnRecord;
+use ntfs_core::mft::MftEntry;
+use ntfs_core::usn::{UsnReason, UsnRecord};
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+/// Where a correlated event originated from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EventSource {
+    /// Found only in $UsnJrnl.
+    UsnJournal,
+    /// Found only in $LogFile.
+    LogFile,
+    /// Found in both $UsnJrnl and $LogFile.
+    Both,
+}
+
+/// A single event in the unified timeline.
+#[derive(Debug, Clone)]
+pub struct CorrelatedEvent {
+    /// The USN record for this event.
+    pub record: UsnRecord,
+    /// Where this event was found.
+    pub source: EventSource,
+    /// LSN from $LogFile (if available).
+    pub lsn: Option<u64>,
+}
+
+/// A USN record found in $LogFile but absent from $UsnJrnl.
+#[derive(Debug, Clone)]
+pub struct GhostRecord {
+    /// The recovered USN record.
+    pub record: UsnRecord,
+    /// LSN where it was found.
+    pub lsn: u64,
+}
+
+/// Coverage analysis comparing $UsnJrnl and $LogFile time ranges.
+#[derive(Debug, Clone)]
+pub struct CoverageAnalysis {
+    /// Earliest $UsnJrnl record timestamp (Unix epoch if no records).
+    pub usn_earliest_ts: DateTime<Utc>,
+    /// Latest $UsnJrnl record timestamp (Unix epoch if no records).
+    pub usn_latest_ts: DateTime<Utc>,
+    /// Number of $UsnJrnl records seen.
+    pub usn_record_count: usize,
+    /// Earliest $LogFile-recovered USN timestamp, if any.
+    pub logfile_earliest_ts: Option<DateTime<Utc>>,
+    /// Latest $LogFile-recovered USN timestamp, if any.
+    pub logfile_latest_ts: Option<DateTime<Utc>>,
+    /// Number of $LogFile-recovered USN records seen.
+    pub logfile_record_count: usize,
+    /// True if $LogFile contains records older than the oldest $UsnJrnl record.
+    pub logfile_extends_before_usn: bool,
+}
+
+/// Type of timestamp conflict between MFT and USN Journal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TimestampConflictType {
+    /// `$STANDARD_INFORMATION` created timestamp predates USN `FILE_CREATE`.
+    SiPredatesUsnCreate,
+}
+
+/// A detected timestamp conflict for a specific MFT entry.
+#[derive(Debug, Clone)]
+pub struct TimestampConflict {
+    /// MFT entry number.
+    pub mft_entry: u64,
+    /// File name as recorded in the MFT entry.
+    pub filename: String,
+    /// The kind of conflict observed.
+    pub conflict_type: TimestampConflictType,
+    /// `$STANDARD_INFORMATION` created timestamp.
+    pub si_timestamp: DateTime<Utc>,
+    /// USN `FILE_CREATE` timestamp.
+    pub usn_timestamp: DateTime<Utc>,
+}
+
+/// Detected MFT entry reuse (same entry number, different sequence).
+#[derive(Debug, Clone)]
+pub struct EntryReuse {
+    /// MFT entry number that was reused.
+    pub mft_entry: u64,
+    /// Sequence number before reuse.
+    pub old_sequence: u16,
+    /// Sequence number after reuse.
+    pub new_sequence: u16,
+    /// File name associated with the old sequence.
+    pub old_filename: String,
+    /// File name associated with the new sequence.
+    pub new_filename: String,
+    /// Timestamp at which the reuse was observed.
+    pub reuse_timestamp: DateTime<Utc>,
+}
+
+/// High-level TriForce correlation report.
+#[derive(Debug, Clone)]
+pub struct TriForceReport {
+    /// Number of events in the unified timeline.
+    pub timeline_event_count: usize,
+    /// Number of ghost records ($LogFile-only) found.
+    pub ghost_record_count: usize,
+    /// True if $LogFile extends before $UsnJrnl (journal-clearing tell).
+    pub journal_clearing_suspected: bool,
+    /// Number of MFT/USN timestamp conflicts.
+    pub timestamp_conflict_count: usize,
+    /// Number of MFT entry reuses detected.
+    pub entry_reuse_count: usize,
+    /// Temporal coverage comparison.
+    pub coverage: CoverageAnalysis,
+}
+
+/// Summary of all activity for a single file (MFT entry).
+#[derive(Debug, Clone)]
+pub struct FileActivitySummary {
+    /// MFT entry number.
+    pub mft_entry: u64,
+    /// MFT sequence number.
+    pub mft_sequence: u16,
+    /// Most-recent file name seen for this entry.
+    pub filename: String,
+    /// Total number of USN events for this entry.
+    pub event_count: usize,
+    /// Earliest event timestamp.
+    pub first_seen: DateTime<Utc>,
+    /// Latest event timestamp.
+    pub last_seen: DateTime<Utc>,
+    /// Union of all reason flags seen for this file.
+    pub reasons: UsnReason,
+}
+
+// ─── Engine ─────────────────────────────────────────────────────────────────
+
+/// The TriForce correlation engine.
+pub struct CorrelationEngine;
+
+impl Default for CorrelationEngine {
+    fn default() -> Self {
+        Self
+    }
+}
+
+impl CorrelationEngine {
+    /// Construct a new correlation engine.
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+
+    /// Build a unified, deduplicated, time-sorted timeline from all sources.
+    #[must_use]
+    pub fn build_timeline(
+        &self,
+        usn_records: &[UsnRecord],
+        logfile_records: &[LogFileUsnRecord],
+        _mft_entries: &[MftEntry],
+    ) -> Vec<CorrelatedEvent> {
+        // Index LogFile records by dedup key: (mft_entry, usn_offset, timestamp_secs)
+        let mut logfile_by_key: HashMap<(u64, i64, i64), u64> = HashMap::new();
+        for lr in logfile_records {
+            let key = (
+                lr.record.mft_entry,
+                lr.record.usn,
+                lr.record.timestamp.timestamp(),
+            );
+            logfile_by_key.insert(key, lr.lsn);
+        }
+
+        let mut events = Vec::new();
+        let mut seen_keys: HashSet<(u64, i64, i64)> = HashSet::new();
+
+        // Add USN journal records, marking duplicates as Both
+        for r in usn_records {
+            let key = (r.mft_entry, r.usn, r.timestamp.timestamp());
+            let (source, lsn) = if let Some(&lsn) = logfile_by_key.get(&key) {
+                (EventSource::Both, Some(lsn))
+            } else {
+                (EventSource::UsnJournal, None)
+            };
+            seen_keys.insert(key);
+            events.push(CorrelatedEvent {
+                record: r.clone(),
+                source,
+                lsn,
+            });
+        }
+
+        // Add LogFile-only records
+        for lr in logfile_records {
+            let key = (
+                lr.record.mft_entry,
+                lr.record.usn,
+                lr.record.timestamp.timestamp(),
+            );
+            if !seen_keys.contains(&key) {
+                events.push(CorrelatedEvent {
+                    record: lr.record.clone(),
+                    source: EventSource::LogFile,
+                    lsn: Some(lr.lsn),
+                });
+            }
+        }
+
+        // Sort by timestamp
+        events.sort_by_key(|e| e.record.timestamp);
+        events
+    }
+
+    /// Find "ghost" records: USN records in $LogFile but absent from $UsnJrnl.
+    #[must_use]
+    pub fn find_ghost_records(
+        &self,
+        usn_records: &[UsnRecord],
+        logfile_records: &[LogFileUsnRecord],
+    ) -> Vec<GhostRecord> {
+        let usn_keys: HashSet<(u64, i64, i64)> = usn_records
+            .iter()
+            .map(|r| (r.mft_entry, r.usn, r.timestamp.timestamp()))
+            .collect();
+
+        logfile_records
+            .iter()
+            .filter(|lr| {
+                let key = (
+                    lr.record.mft_entry,
+                    lr.record.usn,
+                    lr.record.timestamp.timestamp(),
+                );
+                !usn_keys.contains(&key)
+            })
+            .map(|lr| GhostRecord {
+                record: lr.record.clone(),
+                lsn: lr.lsn,
+            })
+            .collect()
+    }
+
+    /// Analyze temporal coverage of $UsnJrnl vs $LogFile USN records.
+    #[must_use]
+    pub fn analyze_coverage(
+        &self,
+        usn_records: &[UsnRecord],
+        logfile_records: &[LogFileUsnRecord],
+    ) -> CoverageAnalysis {
+        let usn_record_count = usn_records.len();
+        let logfile_record_count = logfile_records.len();
+
+        let usn_earliest = usn_records.iter().map(|r| r.timestamp).min();
+        let usn_latest = usn_records.iter().map(|r| r.timestamp).max();
+
+        let lf_earliest = logfile_records.iter().map(|r| r.record.timestamp).min();
+        let lf_latest = logfile_records.iter().map(|r| r.record.timestamp).max();
+
+        // Unix epoch — the documented "no records" sentinel. `unwrap_or_default`
+        // yields the epoch for `DateTime<Utc>` without panicking.
+        let epoch = DateTime::from_timestamp(0, 0).unwrap_or_default();
+
+        let logfile_extends_before_usn = match (usn_earliest, lf_earliest) {
+            (Some(usn_e), Some(lf_e)) => lf_e < usn_e,
+            _ => false,
+        };
+
+        CoverageAnalysis {
+            usn_earliest_ts: usn_earliest.unwrap_or(epoch),
+            usn_latest_ts: usn_latest.unwrap_or(epoch),
+            usn_record_count,
+            logfile_earliest_ts: lf_earliest,
+            logfile_latest_ts: lf_latest,
+            logfile_record_count,
+            logfile_extends_before_usn,
+        }
+    }
+
+    /// Find timestamp conflicts between MFT $SI timestamps and USN `FILE_CREATE` events.
+    #[must_use]
+    pub fn find_timestamp_conflicts(
+        &self,
+        usn_records: &[UsnRecord],
+        mft_entries: &[MftEntry],
+    ) -> Vec<TimestampConflict> {
+        // Index: for each MFT entry, find the earliest USN FILE_CREATE timestamp
+        let mut create_ts: HashMap<u64, DateTime<Utc>> = HashMap::new();
+        for r in usn_records {
+            if r.reason.contains(UsnReason::FILE_CREATE) {
+                create_ts
+                    .entry(r.mft_entry)
+                    .and_modify(|existing| {
+                        if r.timestamp < *existing {
+                            *existing = r.timestamp;
+                        }
+                    })
+                    .or_insert(r.timestamp);
+            }
+        }
+
+        let mut conflicts = Vec::new();
+        for entry in mft_entries {
+            if let Some(&usn_create_ts) = create_ts.get(&entry.entry_number) {
+                if let Some(si_created) = entry.si_created {
+                    // SI_Created significantly before USN FILE_CREATE = timestomped
+                    if si_created < usn_create_ts && (usn_create_ts - si_created).num_seconds() > 2
+                    {
+                        conflicts.push(TimestampConflict {
+                            mft_entry: entry.entry_number,
+                            filename: entry.filename.clone(),
+                            conflict_type: TimestampConflictType::SiPredatesUsnCreate,
+                            si_timestamp: si_created,
+                            usn_timestamp: usn_create_ts,
+                        });
+                    }
+                }
+            }
+        }
+        conflicts
+    }
+
+    /// Detect MFT entry reuse: same entry number with different sequence numbers.
+    #[must_use]
+    pub fn detect_entry_reuse(&self, usn_records: &[UsnRecord]) -> Vec<EntryReuse> {
+        // Track last-seen sequence for each entry, sorted by timestamp
+        let mut sorted: Vec<&UsnRecord> = usn_records.iter().collect();
+        sorted.sort_by_key(|r| r.timestamp);
+
+        let mut last_seen: HashMap<u64, (u16, String)> = HashMap::new();
+        let mut reuses = Vec::new();
+
+        for r in sorted {
+            if let Some((prev_seq, prev_name)) = last_seen.get(&r.mft_entry) {
+                if *prev_seq != r.mft_sequence {
+                    reuses.push(EntryReuse {
+                        mft_entry: r.mft_entry,
+                        old_sequence: *prev_seq,
+                        new_sequence: r.mft_sequence,
+                        old_filename: prev_name.clone(),
+                        new_filename: r.filename.clone(),
+                        reuse_timestamp: r.timestamp,
+                    });
+                }
+            }
+            last_seen.insert(r.mft_entry, (r.mft_sequence, r.filename.clone()));
+        }
+
+        reuses
+    }
+
+    /// Generate a high-level TriForce correlation report.
+    #[must_use]
+    pub fn generate_report(
+        &self,
+        usn_records: &[UsnRecord],
+        logfile_records: &[LogFileUsnRecord],
+        mft_entries: &[MftEntry],
+    ) -> TriForceReport {
+        let timeline = self.build_timeline(usn_records, logfile_records, mft_entries);
+        let ghosts = self.find_ghost_records(usn_records, logfile_records);
+        let coverage = self.analyze_coverage(usn_records, logfile_records);
+        let conflicts = self.find_timestamp_conflicts(usn_records, mft_entries);
+        let reuses = self.detect_entry_reuse(usn_records);
+
+        TriForceReport {
+            timeline_event_count: timeline.len(),
+            ghost_record_count: ghosts.len(),
+            journal_clearing_suspected: coverage.logfile_extends_before_usn,
+            timestamp_conflict_count: conflicts.len(),
+            entry_reuse_count: reuses.len(),
+            coverage,
+        }
+    }
+
+    /// Summarize all USN activity grouped by MFT entry number.
+    #[must_use]
+    pub fn summarize_file_activity(&self, usn_records: &[UsnRecord]) -> Vec<FileActivitySummary> {
+        let mut map: HashMap<(u64, u16), FileActivitySummary> = HashMap::new();
+
+        for r in usn_records {
+            let key = (r.mft_entry, r.mft_sequence);
+            map.entry(key)
+                .and_modify(|s| {
+                    s.event_count += 1;
+                    if r.timestamp < s.first_seen {
+                        s.first_seen = r.timestamp;
+                    }
+                    if r.timestamp > s.last_seen {
+                        s.last_seen = r.timestamp;
+                    }
+                    s.reasons |= r.reason;
+                    // Use latest filename (handles renames)
+                    s.filename.clone_from(&r.filename);
+                })
+                .or_insert(FileActivitySummary {
+                    mft_entry: r.mft_entry,
+                    mft_sequence: r.mft_sequence,
+                    filename: r.filename.clone(),
+                    event_count: 1,
+                    first_seen: r.timestamp,
+                    last_seen: r.timestamp,
+                    reasons: r.reason,
+                });
+        }
+
+        let mut result: Vec<_> = map.into_values().collect();
+        result.sort_by_key(|s| s.first_seen);
+        result
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -12,7 +422,7 @@ mod tests {
     use ntfs_core::mft::MftEntry;
     use ntfs_core::usn::{FileAttributes, UsnReason, UsnRecord};
 
-    /// Helper: build a minimal UsnRecord for testing.
+    /// Helper: build a minimal `UsnRecord` for testing.
     fn usn(
         entry: u64,
         seq: u16,
@@ -38,7 +448,7 @@ mod tests {
         }
     }
 
-    /// Helper: wrap a UsnRecord into a LogFileUsnRecord.
+    /// Helper: wrap a `UsnRecord` into a `LogFileUsnRecord`.
     fn logfile_usn(record: UsnRecord, lsn: u64) -> LogFileUsnRecord {
         LogFileUsnRecord {
             lsn,
@@ -48,7 +458,7 @@ mod tests {
         }
     }
 
-    /// Helper: build a minimal MftEntry for testing.
+    /// Helper: build a minimal `MftEntry` for testing.
     fn mft_entry(entry: u64, seq: u16, parent: u64, name: &str, is_dir: bool) -> MftEntry {
         MftEntry {
             entry_number: entry,
@@ -82,7 +492,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000000,
+                1_700_000_000,
                 "file1.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -91,7 +501,7 @@ mod tests {
                 1,
                 50,
                 2000,
-                1700000100,
+                1_700_000_100,
                 "file2.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -116,7 +526,7 @@ mod tests {
             1,
             50,
             2000,
-            1700000200,
+            1_700_000_200,
             "file1.txt",
             UsnReason::DATA_EXTEND,
         )];
@@ -126,7 +536,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "file1.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -152,7 +562,7 @@ mod tests {
             1,
             50,
             1000,
-            1700000100,
+            1_700_000_100,
             "file1.txt",
             UsnReason::FILE_CREATE,
         );
@@ -177,7 +587,7 @@ mod tests {
             1,
             50,
             5000,
-            1700001000,
+            1_700_001_000,
             "after.txt",
             UsnReason::FILE_CREATE,
         )];
@@ -189,7 +599,7 @@ mod tests {
                     1,
                     50,
                     1000,
-                    1700000100,
+                    1_700_000_100,
                     "deleted_evidence.txt",
                     UsnReason::FILE_CREATE,
                 ),
@@ -201,7 +611,7 @@ mod tests {
                     1,
                     50,
                     2000,
-                    1700000200,
+                    1_700_000_200,
                     "wiped.exe",
                     UsnReason::FILE_DELETE | UsnReason::CLOSE,
                 ),
@@ -226,7 +636,7 @@ mod tests {
             1,
             50,
             1000,
-            1700000100,
+            1_700_000_100,
             "file1.txt",
             UsnReason::FILE_CREATE,
         );
@@ -249,7 +659,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "a.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -258,7 +668,7 @@ mod tests {
                 1,
                 50,
                 5000,
-                1700000500,
+                1_700_000_500,
                 "b.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -269,7 +679,7 @@ mod tests {
                 1,
                 50,
                 500,
-                1700000050,
+                1_700_000_050,
                 "early.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -280,14 +690,14 @@ mod tests {
         let coverage = engine.analyze_coverage(&usn_records, &logfile_records);
 
         // UsnJrnl range
-        assert_eq!(coverage.usn_earliest_ts.timestamp(), 1700000100);
-        assert_eq!(coverage.usn_latest_ts.timestamp(), 1700000500);
+        assert_eq!(coverage.usn_earliest_ts.timestamp(), 1_700_000_100);
+        assert_eq!(coverage.usn_latest_ts.timestamp(), 1_700_000_500);
         assert_eq!(coverage.usn_record_count, 2);
 
         // LogFile range
         assert_eq!(
             coverage.logfile_earliest_ts.unwrap().timestamp(),
-            1700000050
+            1_700_000_050
         );
         assert_eq!(coverage.logfile_record_count, 1);
 
@@ -299,18 +709,18 @@ mod tests {
 
     #[test]
     fn test_mft_usn_timestamp_conflicts() {
-        // MFT says file was created at ts=1700000100
+        // MFT says file was created at ts=1_700_000_100
         let mut entry = mft_entry(100, 1, 50, "suspicious.exe", false);
-        entry.si_created = Some(DateTime::from_timestamp(1700000100, 0).unwrap());
-        entry.fn_created = Some(DateTime::from_timestamp(1700000500, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_700_000_100, 0).unwrap());
+        entry.fn_created = Some(DateTime::from_timestamp(1_700_000_500, 0).unwrap());
 
-        // USN Journal says file was created at ts=1700000500
+        // USN Journal says file was created at ts=1_700_000_500
         let usn_records = vec![usn(
             100,
             1,
             50,
             1000,
-            1700000500,
+            1_700_000_500,
             "suspicious.exe",
             UsnReason::FILE_CREATE,
         )];
@@ -318,7 +728,7 @@ mod tests {
         let engine = CorrelationEngine::new();
         let conflicts = engine.find_timestamp_conflicts(&usn_records, &[entry]);
 
-        // SI_Created (1700000100) predates the USN FILE_CREATE (1700000500) = timestomped
+        // SI_Created (1_700_000_100) predates the USN FILE_CREATE (1_700_000_500) = timestomped
         assert_eq!(conflicts.len(), 1);
         assert_eq!(conflicts[0].mft_entry, 100);
         assert_eq!(
@@ -332,14 +742,14 @@ mod tests {
         // Two FILE_CREATE records for entry 100; the second is earlier, exercising
         // the and_modify path that keeps the earliest USN create timestamp.
         let mut entry = mft_entry(100, 1, 50, "evil.exe", false);
-        entry.si_created = Some(DateTime::from_timestamp(1700000000, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_700_000_000, 0).unwrap());
         let usn_records = vec![
             usn(
                 100,
                 1,
                 50,
                 2000,
-                1700000500,
+                1_700_000_500,
                 "evil.exe",
                 UsnReason::FILE_CREATE,
             ),
@@ -348,18 +758,18 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000300,
+                1_700_000_300,
                 "evil.exe",
                 UsnReason::FILE_CREATE,
             ),
         ];
         let engine = CorrelationEngine::new();
         let conflicts = engine.find_timestamp_conflicts(&usn_records, &[entry]);
-        // Earliest create (1700000300) is used; si_created (1700000000) predates it.
+        // Earliest create (1_700_000_300) is used; si_created (1_700_000_000) predates it.
         assert_eq!(conflicts.len(), 1);
         assert_eq!(
             conflicts[0].usn_timestamp,
-            DateTime::from_timestamp(1700000300, 0).unwrap()
+            DateTime::from_timestamp(1_700_000_300, 0).unwrap()
         );
     }
 
@@ -376,11 +786,11 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000500,
+                1_700_000_500,
                 "a.txt",
                 UsnReason::FILE_CREATE,
             ),
-            usn(100, 1, 50, 1100, 1700000600, "a.txt", UsnReason::CLOSE),
+            usn(100, 1, 50, 1100, 1_700_000_600, "a.txt", UsnReason::CLOSE),
         ];
         let engine = CorrelationEngine::new();
         let conflicts = engine.find_timestamp_conflicts(&usn_records, &[e_no_si, e_no_create]);
@@ -392,7 +802,7 @@ mod tests {
     #[test]
     fn test_no_conflict_when_timestamps_consistent() {
         let mut entry = mft_entry(100, 1, 50, "normal.txt", false);
-        let ts = DateTime::from_timestamp(1700000500, 0).unwrap();
+        let ts = DateTime::from_timestamp(1_700_000_500, 0).unwrap();
         entry.si_created = Some(ts);
         entry.fn_created = Some(ts);
 
@@ -401,7 +811,7 @@ mod tests {
             1,
             50,
             1000,
-            1700000500,
+            1_700_000_500,
             "normal.txt",
             UsnReason::FILE_CREATE,
         )];
@@ -422,7 +832,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "report.docx",
                 UsnReason::FILE_CREATE,
             ),
@@ -431,7 +841,7 @@ mod tests {
                 1,
                 50,
                 2000,
-                1700000200,
+                1_700_000_200,
                 "report.docx",
                 UsnReason::DATA_EXTEND,
             ),
@@ -440,7 +850,7 @@ mod tests {
                 1,
                 50,
                 3000,
-                1700000300,
+                1_700_000_300,
                 "report.docx",
                 UsnReason::CLOSE,
             ),
@@ -449,7 +859,7 @@ mod tests {
                 1,
                 50,
                 4000,
-                1700000400,
+                1_700_000_400,
                 "report.docx",
                 UsnReason::DATA_EXTEND,
             ),
@@ -458,7 +868,7 @@ mod tests {
                 1,
                 50,
                 5000,
-                1700000500,
+                1_700_000_500,
                 "report.docx",
                 UsnReason::CLOSE,
             ),
@@ -472,8 +882,8 @@ mod tests {
         assert_eq!(summary.mft_entry, 100);
         assert_eq!(summary.filename, "report.docx");
         assert_eq!(summary.event_count, 5);
-        assert_eq!(summary.first_seen.timestamp(), 1700000100);
-        assert_eq!(summary.last_seen.timestamp(), 1700000500);
+        assert_eq!(summary.first_seen.timestamp(), 1_700_000_100);
+        assert_eq!(summary.last_seen.timestamp(), 1_700_000_500);
         assert!(summary.reasons.contains(UsnReason::FILE_CREATE));
         assert!(summary.reasons.contains(UsnReason::DATA_EXTEND));
         assert!(summary.reasons.contains(UsnReason::CLOSE));
@@ -508,7 +918,7 @@ mod tests {
                 3,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "old_file.txt",
                 UsnReason::FILE_DELETE | UsnReason::CLOSE,
             ),
@@ -517,7 +927,7 @@ mod tests {
                 4,
                 60,
                 2000,
-                1700000200,
+                1_700_000_200,
                 "new_file.exe",
                 UsnReason::FILE_CREATE,
             ),
@@ -544,7 +954,7 @@ mod tests {
                 3,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "file.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -553,7 +963,7 @@ mod tests {
                 3,
                 50,
                 2000,
-                1700000200,
+                1_700_000_200,
                 "file.txt",
                 UsnReason::DATA_EXTEND,
             ),
@@ -573,7 +983,7 @@ mod tests {
             1,
             50,
             5000,
-            1700001000,
+            1_700_001_000,
             "current.txt",
             UsnReason::FILE_CREATE,
         )];
@@ -583,14 +993,14 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "ghost.exe",
                 UsnReason::FILE_CREATE,
             ),
             200,
         )];
         let mut entry = mft_entry(100, 1, 50, "current.txt", false);
-        entry.si_created = Some(DateTime::from_timestamp(1700000500, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_700_000_500, 0).unwrap());
 
         let engine = CorrelationEngine::new();
         let report = engine.generate_report(&usn_records, &logfile_records, &[entry]);
@@ -611,7 +1021,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "a.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -620,11 +1030,11 @@ mod tests {
                 1,
                 50,
                 2000,
-                1700000200,
+                1_700_000_200,
                 "b.txt",
                 UsnReason::FILE_CREATE,
             ),
-            usn(100, 1, 50, 3000, 1700000300, "a.txt", UsnReason::CLOSE),
+            usn(100, 1, 50, 3000, 1_700_000_300, "a.txt", UsnReason::CLOSE),
         ];
 
         let engine = CorrelationEngine::new();
@@ -653,7 +1063,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000300,
+                1_700_000_300,
                 "file.exe",
                 UsnReason::FILE_CREATE,
             ),
@@ -662,7 +1072,7 @@ mod tests {
                 1,
                 50,
                 2000,
-                1700000100,
+                1_700_000_100,
                 "file.exe",
                 UsnReason::FILE_CREATE,
             ), // earlier
@@ -671,7 +1081,7 @@ mod tests {
                 1,
                 50,
                 3000,
-                1700000200,
+                1_700_000_200,
                 "file.exe",
                 UsnReason::FILE_CREATE,
             ),
@@ -679,14 +1089,14 @@ mod tests {
 
         // MFT says SI_Created is way before the earliest USN create -> conflict
         let mut entry = mft_entry(100, 1, 50, "file.exe", false);
-        entry.si_created = Some(DateTime::from_timestamp(1699999000, 0).unwrap());
+        entry.si_created = Some(DateTime::from_timestamp(1_699_999_000, 0).unwrap());
 
         let engine = CorrelationEngine::new();
         let conflicts = engine.find_timestamp_conflicts(&usn_records, &[entry]);
 
         assert_eq!(conflicts.len(), 1);
-        // The USN timestamp used should be the earliest (1700000100)
-        assert_eq!(conflicts[0].usn_timestamp.timestamp(), 1700000100);
+        // The USN timestamp used should be the earliest (1_700_000_100)
+        assert_eq!(conflicts[0].usn_timestamp.timestamp(), 1_700_000_100);
     }
 
     // ─── Test 17: File activity summary first_seen/last_seen update ──────
@@ -702,7 +1112,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000200,
+                1_700_000_200,
                 "data.txt",
                 UsnReason::FILE_CREATE,
             ),
@@ -712,7 +1122,7 @@ mod tests {
                 1,
                 50,
                 2000,
-                1700000100,
+                1_700_000_100,
                 "data.txt",
                 UsnReason::DATA_EXTEND,
             ),
@@ -722,7 +1132,7 @@ mod tests {
                 1,
                 50,
                 3000,
-                1700000300,
+                1_700_000_300,
                 "data_renamed.txt",
                 UsnReason::RENAME_NEW_NAME,
             ),
@@ -735,8 +1145,8 @@ mod tests {
         let s = &summaries[0];
         assert_eq!(s.mft_entry, 100);
         assert_eq!(s.event_count, 3);
-        assert_eq!(s.first_seen.timestamp(), 1700000100);
-        assert_eq!(s.last_seen.timestamp(), 1700000300);
+        assert_eq!(s.first_seen.timestamp(), 1_700_000_100);
+        assert_eq!(s.last_seen.timestamp(), 1_700_000_300);
         assert_eq!(s.filename, "data_renamed.txt"); // latest filename used
                                                     // All reasons accumulated
         assert!(s.reasons.contains(UsnReason::FILE_CREATE));
@@ -752,7 +1162,7 @@ mod tests {
                 1,
                 50,
                 1000,
-                1700000100,
+                1_700_000_100,
                 "file.txt",
                 UsnReason::FILE_CREATE,
             ),
