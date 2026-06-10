@@ -491,11 +491,18 @@ mod tests {
     /// One `$ATTRIBUTE_LIST` entry: attribute `type_code` (id `attr_id`) lives in
     /// MFT `record`.
     fn attrlist_entry(type_code: u32, record: u64, attr_id: u16) -> Vec<u8> {
+        attrlist_entry_vcn(type_code, record, attr_id, 0)
+    }
+
+    /// Like [`attrlist_entry`] but with an explicit starting VCN — used to point
+    /// a later `$DATA` fragment (VCN > 0) at its extension record.
+    fn attrlist_entry_vcn(type_code: u32, record: u64, attr_id: u16, start_vcn: u64) -> Vec<u8> {
         let len = 0x20usize; // ENTRY_MIN (0x1A) padded to 8
         let mut e = vec![0u8; len];
         e[0x00..0x04].copy_from_slice(&type_code.to_le_bytes());
         e[0x04..0x06].copy_from_slice(&(len as u16).to_le_bytes());
         e[0x07] = 0x1A; // name_offset (no name)
+        e[0x08..0x10].copy_from_slice(&start_vcn.to_le_bytes());
         e[0x10..0x18].copy_from_slice(&((1u64 << 48) | record).to_le_bytes()); // base ref
         e[0x18..0x1A].copy_from_slice(&attr_id.to_le_bytes());
         e
@@ -631,6 +638,85 @@ mod tests {
         vol[c1..c1 + CLUSTER].fill(b'B');
 
         Cursor::new(vol)
+    }
+
+    /// Build a volume whose `$MFT` `$DATA` runlist is split across record 0 and
+    /// an extension record (record 4) via an `$ATTRIBUTE_LIST` — the real-world
+    /// case where the MFT outgrows a single FILE record. The first `$DATA`
+    /// fragment (VCN 0) maps the first half of the MFT (records 0–7); the second
+    /// fragment (VCN 16) — described in extension record 4 — maps the second
+    /// half (records 8–15). A reader that ignores the `$ATTRIBUTE_LIST` sees only
+    /// the first fragment and truncates the MFT.
+    fn build_volume_split_mft() -> Cursor<Vec<u8>> {
+        const NUM_RECORDS: usize = 16;
+        let mft_clusters = (NUM_RECORDS * REC / CLUSTER) as u64; // 32
+        let half = mft_clusters / 2; // 16
+        let total_clusters = MFT_LCN + mft_clusters;
+        let mut vol = vec![0u8; total_clusters as usize * CLUSTER];
+        vol[0..512].copy_from_slice(&build_boot());
+
+        // The MFT is laid out contiguously starting at MFT_LCN, but its $DATA is
+        // *described* as two fragments so it must be reassembled from both.
+        let lcn0 = MFT_LCN as u8; // first fragment LCN (4)
+        let lcn1 = (MFT_LCN + half) as u8; // second fragment LCN (20)
+
+        // record 0: $MFT base. First $DATA fragment (VCN 0, `half` clusters) plus
+        // an $ATTRIBUTE_LIST whose second $DATA entry (VCN `half`) is in record 4.
+        let attrlist = [
+            attrlist_entry(attr_types::DATA, 0, 0),
+            attrlist_entry_vcn(attr_types::DATA, 4, 1, half),
+        ]
+        .concat();
+        let mut a0 = Vec::new();
+        a0.extend_from_slice(&attr_resident(attr_types::ATTRIBUTE_LIST, None, &attrlist));
+        a0.extend_from_slice(&nonresident_data_vcn(
+            &[0x11, half as u8, lcn0, 0x00],
+            mft_clusters * CLUSTER as u64,
+            0,
+        ));
+        let rec0 = build_record(0x0001, &a0);
+
+        // record 4: extension record holding the $MFT's second $DATA fragment
+        // (VCN `half`, the remaining `half` clusters at lcn1).
+        let rec4 = build_record(
+            0x0001,
+            &nonresident_data_vcn(&[0x11, half as u8, lcn1, 0x00], 0, half),
+        );
+
+        let mft_off = MFT_LCN as usize * CLUSTER;
+        let place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
+            let o = mft_off + idx * REC;
+            vol[o..o + rec.len()].copy_from_slice(rec);
+        };
+        place(&mut vol, 0, &rec0);
+        place(&mut vol, 4, &rec4);
+        // Mark every record with its own number so reads can be verified; record
+        // 12 lives in the SECOND $DATA fragment (records 8–15).
+        for n in 0..NUM_RECORDS {
+            if n == 0 || n == 4 {
+                continue;
+            }
+            place(&mut vol, n, &build_record(0x0001, &resident_data(&[n as u8])));
+        }
+
+        Cursor::new(vol)
+    }
+
+    #[test]
+    fn open_assembles_split_mft_data_via_attribute_list() {
+        // record 12 physically lives in the $MFT's SECOND $DATA fragment, only
+        // reachable once record 0's $ATTRIBUTE_LIST is followed. Before the fix
+        // this fails with "read past end of runs".
+        let mut fs = NtfsFs::open(build_volume_split_mft()).unwrap();
+        let rec12 = fs.read_record(12).unwrap();
+        assert_eq!(&rec12[0..4], b"FILE");
+        let header = MftRecordHeader::parse(&rec12).unwrap();
+        let attrs = parse_attributes(&rec12, header.first_attribute_offset as usize).unwrap();
+        let data = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::DATA)
+            .unwrap();
+        assert_eq!(data.resident_content(&rec12), Some(&[12u8][..]));
     }
 
     #[test]
