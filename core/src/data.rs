@@ -314,6 +314,53 @@ mod tests {
     }
 
     #[test]
+    fn reads_compressed_nonresident_value() {
+        use forensicnomicon::ntfs::attr_types;
+        // A COMPRESSED $DATA: one 16-cluster compression unit made of 1 real
+        // cluster (the LZNT1 stream) + 15 sparse clusters. real_size = 100 bytes.
+        // The stream is a single *uncompressed* LZNT1 chunk (header bit15=0,
+        // low-12 = size-1), which is valid LZNT1 the decompressor copies verbatim
+        // — lets us build a real compressed-unit fixture without a compressor.
+        let content = vec![0xABu8; 100];
+        let mut stream = Vec::new();
+        stream.extend_from_slice(&(content.len() as u16 - 1).to_le_bytes()); // 0x0063
+        stream.extend_from_slice(&content);
+
+        // runlist: 0x11 len=1 lcn+2 | 0x01 len=15 sparse | 0x00 end
+        let runs_bytes = [0x11u8, 0x01, 0x02, 0x01, 0x0F, 0x00];
+        let attr_off = 0x10usize;
+        let mut record = vec![0u8; attr_off];
+        let runs_offset = 0x40u16;
+        let length = ((runs_offset as usize + runs_bytes.len()) + 7) & !7;
+        let mut a = vec![0u8; length];
+        a[0x00..0x04].copy_from_slice(&attr_types::DATA.to_le_bytes());
+        a[0x04..0x08].copy_from_slice(&(length as u32).to_le_bytes());
+        a[0x08] = 1; // non-resident
+        a[0x0A..0x0C].copy_from_slice(&runs_offset.to_le_bytes()); // name offset (no name)
+        a[0x0C..0x0E].copy_from_slice(&0x0001u16.to_le_bytes()); // flags: COMPRESSED
+        a[0x20..0x22].copy_from_slice(&runs_offset.to_le_bytes()); // runs offset
+        a[0x22..0x24].copy_from_slice(&4u16.to_le_bytes()); // compression_unit = 4 → 16 clusters
+        a[0x28..0x30].copy_from_slice(&(16u64 * 512).to_le_bytes()); // allocated 8192
+        a[0x30..0x38].copy_from_slice(&(content.len() as u64).to_le_bytes()); // real size 100
+        a[runs_offset as usize..runs_offset as usize + runs_bytes.len()]
+            .copy_from_slice(&runs_bytes);
+        record.extend_from_slice(&a);
+        record.extend_from_slice(&attr_types::END.to_le_bytes());
+
+        let cluster_size = 512usize;
+        let mut disk = vec![0u8; 16 * cluster_size];
+        disk[2 * cluster_size..2 * cluster_size + stream.len()].copy_from_slice(&stream);
+        let mut vol = std::io::Cursor::new(disk);
+
+        let attrs = crate::attribute::parse_attributes(&record, attr_off).unwrap();
+        let out = read_attribute_value(&mut vol, &record, &attrs[0], 512).unwrap();
+        assert_eq!(
+            out, content,
+            "compressed $DATA must be LZNT1-decompressed, not returned raw"
+        );
+    }
+
+    #[test]
     fn stops_reading_once_real_size_is_met() {
         // real_size covers only the first run; the second run must not be read.
         let mut vol = volume(4, 512);
