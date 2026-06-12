@@ -106,21 +106,43 @@ pub fn read_attribute_value<R: Read + Seek>(
             }),
         AttributeBody::NonResident { real_size, .. } => {
             let runs = attribute_runlist(record, attribute)?;
-            let cu = attribute.compression_unit();
-            if attribute.is_compressed() && cu != 0 {
-                // Compressed `$DATA` stores data in 2^cu-cluster units. checked_shl
-                // rejects an implausible (crafted) unit shift before it overflows.
-                let unit_clusters = 1u64.checked_shl(u32::from(cu)).ok_or(
-                    NtfsError::BadAttribute {
-                        offset: attribute.offset,
-                        detail: "implausible compression unit",
-                    },
-                )?;
-                read_compressed_runs(reader, &runs, cluster_size, real_size, unit_clusters)
-            } else {
-                read_runs(reader, &runs, cluster_size, real_size)
-            }
+            read_nonresident(reader, &runs, cluster_size, real_size, attribute)
         }
+    }
+}
+
+/// Read a non-resident `$DATA` value from its (already-assembled) runlist,
+/// LZNT1-decompressing when `attribute` is compressed.
+///
+/// This is the **single** dispatch point for both the single-record path
+/// ([`read_attribute_value`]) and the split-runlist path
+/// (`NtfsFs::read_data_stream`, which concatenates a `$DATA` spread across
+/// `$ATTRIBUTE_LIST` extension records) — so neither can read a compressed file
+/// as raw bytes. (A compressed `$DATA` stores data in `2^compression_unit`
+/// clusters; `checked_shl` rejects an implausible crafted unit before overflow.)
+///
+/// # Errors
+///
+/// As [`read_runs`] / [`read_compressed_runs`], plus [`NtfsError::BadAttribute`]
+/// for an implausible compression unit.
+pub(crate) fn read_nonresident<R: Read + Seek>(
+    reader: &mut R,
+    runs: &[Run],
+    cluster_size: u64,
+    real_size: u64,
+    attribute: &Attribute,
+) -> Result<Vec<u8>> {
+    let cu = attribute.compression_unit();
+    if attribute.is_compressed() && cu != 0 {
+        let unit_clusters = 1u64
+            .checked_shl(u32::from(cu))
+            .ok_or(NtfsError::BadAttribute {
+                offset: attribute.offset,
+                detail: "implausible compression unit",
+            })?;
+        read_compressed_runs(reader, runs, cluster_size, real_size, unit_clusters)
+    } else {
+        read_runs(reader, runs, cluster_size, real_size)
     }
 }
 

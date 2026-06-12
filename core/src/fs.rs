@@ -226,7 +226,16 @@ impl<R: Read + Seek> NtfsFs<R> {
         for (_, _, idx, attr) in &fragments {
             runs.extend(crate::data::attribute_runlist(&records[*idx], attr)?);
         }
-        crate::data::read_runs(&mut self.reader, &runs, cluster_size, real_size)
+        // The compression flag + unit live on the `$DATA` attribute (identical
+        // across fragments); dispatch through the shared non-resident reader so a
+        // compressed file is LZNT1-decompressed, not returned as raw bytes.
+        crate::data::read_nonresident(
+            &mut self.reader,
+            &runs,
+            cluster_size,
+            real_size,
+            &fragments[0].3,
+        )
     }
 
     /// The base record plus every distinct extension record referenced by its
