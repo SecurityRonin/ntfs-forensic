@@ -78,6 +78,19 @@ impl Attribute {
         self.flags & flag::COMPRESSED != 0
     }
 
+    /// The compression-unit size as a power of two clusters (NTFS `2^n`; `0`
+    /// means no compression unit / resident). A compressed `$DATA` stores its
+    /// data in `2^compression_unit`-cluster units.
+    #[must_use]
+    pub fn compression_unit(&self) -> u16 {
+        match self.body {
+            AttributeBody::NonResident {
+                compression_unit, ..
+            } => compression_unit,
+            AttributeBody::Resident { .. } => 0,
+        }
+    }
+
     /// `true` if the attribute is encrypted (EFS).
     #[must_use]
     pub fn is_encrypted(&self) -> bool {

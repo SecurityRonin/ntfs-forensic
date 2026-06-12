@@ -106,9 +106,108 @@ pub fn read_attribute_value<R: Read + Seek>(
             }),
         AttributeBody::NonResident { real_size, .. } => {
             let runs = attribute_runlist(record, attribute)?;
-            read_runs(reader, &runs, cluster_size, real_size)
+            let cu = attribute.compression_unit();
+            if attribute.is_compressed() && cu != 0 {
+                // Compressed `$DATA` stores data in 2^cu-cluster units. checked_shl
+                // rejects an implausible (crafted) unit shift before it overflows.
+                let unit_clusters = 1u64.checked_shl(u32::from(cu)).ok_or(
+                    NtfsError::BadAttribute {
+                        offset: attribute.offset,
+                        detail: "implausible compression unit",
+                    },
+                )?;
+                read_compressed_runs(reader, &runs, cluster_size, real_size, unit_clusters)
+            } else {
+                read_runs(reader, &runs, cluster_size, real_size)
+            }
         }
     }
+}
+
+/// Read a COMPRESSED non-resident attribute, LZNT1-decompressing each
+/// compression unit. NTFS stores a compressed file in `unit_clusters`-cluster
+/// units; within a unit the data is either: fully allocated (stored
+/// uncompressed → copied verbatim), partially allocated then sparse-padded (the
+/// allocated clusters hold the LZNT1 stream → decompressed), or fully sparse (a
+/// unit of zeroes). The result is truncated to `real_size`.
+///
+/// # Errors
+///
+/// [`NtfsError::TooLarge`] for an implausible size, [`NtfsError::BadRunlist`] on
+/// arithmetic overflow, [`NtfsError::BadCompression`] on a malformed LZNT1
+/// stream, or [`NtfsError::Io`] on read failure.
+fn read_compressed_runs<R: Read + Seek>(
+    reader: &mut R,
+    runs: &[Run],
+    cluster_size: u64,
+    real_size: u64,
+    unit_clusters: u64,
+) -> Result<Vec<u8>> {
+    if real_size > MAX_VALUE_BYTES {
+        return Err(NtfsError::TooLarge { bytes: real_size });
+    }
+    let unit_bytes = unit_clusters
+        .checked_mul(cluster_size)
+        .ok_or(NtfsError::BadRunlist("compression unit byte size overflow"))?;
+
+    // Run cursor: (lcn, remaining_clusters), mutated as clusters are consumed.
+    let mut queue: std::collections::VecDeque<(Option<u64>, u64)> =
+        runs.iter().map(|r| (r.lcn, r.length)).collect();
+    let real_size_usize =
+        usize::try_from(real_size).map_err(|_| NtfsError::TooLarge { bytes: real_size })?;
+    let mut out: Vec<u8> = Vec::new();
+
+    while (out.len() as u64) < real_size {
+        // Gather exactly one compression unit (`unit_clusters` of VCN) from the
+        // runlist; the leading allocated clusters (if any) hold the unit's bytes.
+        let mut real_bytes: Vec<u8> = Vec::new();
+        let mut real_clusters = 0u64;
+        let mut got = 0u64;
+        while got < unit_clusters {
+            let Some((lcn, avail)) = queue.front_mut() else {
+                break;
+            };
+            let take = (unit_clusters - got).min(*avail);
+            if let Some(l) = *lcn {
+                let byte_off = l
+                    .checked_mul(cluster_size)
+                    .ok_or(NtfsError::BadRunlist("LCN byte offset overflow"))?;
+                let nbytes = usize::try_from(take * cluster_size)
+                    .map_err(|_| NtfsError::TooLarge { bytes: take * cluster_size })?;
+                reader.seek(SeekFrom::Start(byte_off))?;
+                let start = real_bytes.len();
+                real_bytes.resize(start + nbytes, 0);
+                reader.read_exact(&mut real_bytes[start..])?;
+                real_clusters += take;
+                *lcn = Some(l + take); // advance the LCN within this run
+            }
+            *avail -= take;
+            if *avail == 0 {
+                queue.pop_front();
+            }
+            got += take;
+        }
+        if got == 0 {
+            break; // runlist exhausted
+        }
+
+        if real_clusters == 0 {
+            // Fully sparse unit → a unit of zeroes (bounded by the file tail).
+            let want = unit_bytes.min(real_size - out.len() as u64);
+            let want = usize::try_from(want).map_err(|_| NtfsError::TooLarge { bytes: want })?;
+            out.resize(out.len() + want, 0);
+        } else if real_clusters == unit_clusters {
+            // Fully allocated → stored uncompressed; append verbatim.
+            out.extend_from_slice(&real_bytes);
+        } else {
+            // Partially allocated → the allocated clusters hold the LZNT1 stream.
+            let decompressed = crate::compress::decompress(&real_bytes)?;
+            out.extend_from_slice(&decompressed);
+        }
+    }
+
+    out.truncate(real_size_usize);
+    Ok(out)
 }
 
 /// Decode the data-run list of a non-resident attribute from its (fixed-up)
