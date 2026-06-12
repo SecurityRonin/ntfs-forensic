@@ -38,7 +38,6 @@ pub mod attribute_list;
 pub mod boot;
 mod bytes;
 pub mod carve;
-pub mod compress;
 pub mod data;
 pub mod error;
 pub mod file_name;
@@ -60,8 +59,10 @@ pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use attribute_list::{parse as parse_attribute_list, AttributeListEntry};
 pub use boot::BootSector;
 pub use carve::{carve_mft_entries, CarvedMftEntry, MftCarvingStats};
-pub use compress::decompress;
 pub use data::{read_attribute_value, read_runs};
+/// LZNT1 decompression, re-exported from the `lznt1` crate (the codec NTFS uses
+/// for compressed `$DATA`).
+pub use lznt1::decompress;
 pub use error::{NtfsError, Result};
 pub use file_name::{FileName, FileReference};
 pub use fs::NtfsFs;

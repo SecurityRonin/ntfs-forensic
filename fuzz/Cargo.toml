@@ -54,12 +54,6 @@ test = false
 doc = false
 bench = false
 
-[[bin]]
-name = "compress"
-path = "fuzz_targets/compress.rs"
-test = false
-doc = false
-bench = false
 
 [[bin]]
 name = "attribute_list"

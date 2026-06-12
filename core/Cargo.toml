@@ -16,6 +16,11 @@ exclude = ["/fuzz", "/.github", "/docs"]
 
 [dependencies]
 thiserror = "2"
+# LZNT1 decompression for compressed $DATA. A maintained, no_std, unsafe-free
+# pure-Rust codec that is correct on real Windows streams (validated byte-for-byte
+# against The Sleuth Kit) and ships an encoder too — preferred over re-rolling our
+# own decode-only copy.
+lznt1 = "0.1"
 # NTFS on-disk structure knowledge (magic bytes, field offsets, type codes)
 # lives in the KNOWLEDGE layer â the published forensicnomicon crate.
 forensicnomicon = "0.3.1"
