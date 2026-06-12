@@ -90,16 +90,20 @@ fn decompress_chunk(chunk: &[u8], out: &mut Vec<u8>) -> Result<()> {
                     return Err(NtfsError::BadCompression("chunk decodes past 4 KiB window"));
                 }
 
-                // The length/offset bit-split widens as the chunk fills.
-                let mut length_bits = 4u32;
-                let mut threshold = 0x10usize;
-                while produced >= threshold {
-                    length_bits += 1;
-                    threshold <<= 1;
+                // The length/offset split shifts as the 4 KiB window fills: more
+                // of the token goes to the offset (and less to the length) the
+                // further back a reference can reach. `displacement` is the number
+                // of right-shifts of the last written index until it is < 0x10;
+                // the low `12 - displacement` bits are the length, the rest the
+                // offset (MS LZNT1; ref: Rekall lznt1.py / Russinovich).
+                let mut hi = produced - 1; // index of the last byte written (produced ≥ 1)
+                let mut displacement = 0u32;
+                while hi >= 0x10 {
+                    hi >>= 1;
+                    displacement += 1;
                 }
-                let length_mask = (1u16 << length_bits) - 1;
-                let length = (token & length_mask) as usize + 3;
-                let offset = (token >> length_bits) as usize + 1;
+                let length = (token & (0x0FFFu16 >> displacement)) as usize + 3;
+                let offset = (token >> (12 - displacement)) as usize + 1;
                 if offset > produced {
                     return Err(NtfsError::BadCompression(
                         "back-reference before chunk start",
@@ -168,11 +172,15 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::identity_op)] // keep the ((offset-1)<<4)|(length-3) formula explicit
+    #[allow(clippy::identity_op)] // keep the ((offset-1)<<12)|(length-3) formula explicit
     fn decompresses_back_reference() {
         // Literals "abc", then a back-reference (offset 3, length 3) ⇒ "abcabc".
-        // After 3 bytes, length_bits = 4 ⇒ token = ((offset-1) << 4) | (length-3).
-        let token: u16 = ((3 - 1) << 4) | (3 - 3); // offset 3, length 3
+        // After 3 bytes the last-written index is 2 (< 0x10) so displacement = 0:
+        // the LOW 12 bits are the length, the high 4 bits the offset
+        // ⇒ token = ((offset-1) << 12) | (length-3). (This is the byte-for-byte
+        // split validated against real Windows LZNT1 via TSK; the earlier
+        // `<< 4` form matched a decoder bug, not the format.)
+        let token: u16 = ((3 - 1) << 12) | (3 - 3); // offset 3, length 3
         let tb = token.to_le_bytes();
         // flags: bits 0..2 literals (0), bit 3 back-ref (1) ⇒ 0b0000_1000 = 0x08.
         let body = [0x08, b'a', b'b', b'c', tb[0], tb[1]];

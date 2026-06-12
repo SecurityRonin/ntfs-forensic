@@ -223,7 +223,11 @@ fn read_compressed_runs<R: Read + Seek>(
             out.extend_from_slice(&real_bytes);
         } else {
             // Partially allocated → the allocated clusters hold the LZNT1 stream.
-            let decompressed = crate::compress::decompress(&real_bytes)?;
+            // A unit decodes to at most unit_bytes; cap it so any trailing cluster
+            // slack the decoder ran into can't misalign later units (the final
+            // unit is bounded by the truncate to real_size below).
+            let mut decompressed = crate::compress::decompress(&real_bytes)?;
+            decompressed.truncate(unit_bytes as usize);
             out.extend_from_slice(&decompressed);
         }
     }
