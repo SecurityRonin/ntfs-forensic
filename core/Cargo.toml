@@ -1,6 +1,6 @@
 [package]
 name = "ntfs-core"
-version = "0.7.2"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -23,7 +23,7 @@ thiserror = "2"
 lznt1 = "0.1"
 # NTFS on-disk structure knowledge (magic bytes, field offsets, type codes)
 # lives in the KNOWLEDGE layer â the published forensicnomicon crate.
-forensicnomicon = "0.3.1"
+forensicnomicon = "0.5"
 # USN journal record parsing: typed reason/attribute flag sets and FILETIME
 # timestamp conversion for $UsnJrnl:$J records.
 bitflags = "2"

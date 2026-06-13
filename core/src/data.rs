@@ -194,8 +194,10 @@ fn read_compressed_runs<R: Read + Seek>(
                 let byte_off = l
                     .checked_mul(cluster_size)
                     .ok_or(NtfsError::BadRunlist("LCN byte offset overflow"))?;
-                let nbytes = usize::try_from(take * cluster_size)
-                    .map_err(|_| NtfsError::TooLarge { bytes: take * cluster_size })?;
+                let nbytes =
+                    usize::try_from(take * cluster_size).map_err(|_| NtfsError::TooLarge {
+                        bytes: take * cluster_size,
+                    })?;
                 reader.seek(SeekFrom::Start(byte_off))?;
                 let start = real_bytes.len();
                 real_bytes.resize(start + nbytes, 0);

@@ -60,14 +60,14 @@ pub use attribute_list::{parse as parse_attribute_list, AttributeListEntry};
 pub use boot::BootSector;
 pub use carve::{carve_mft_entries, CarvedMftEntry, MftCarvingStats};
 pub use data::{read_attribute_value, read_runs};
-/// LZNT1 decompression, re-exported from the `lznt1` crate (the codec NTFS uses
-/// for compressed `$DATA`).
-pub use lznt1::decompress;
 pub use error::{NtfsError, Result};
 pub use file_name::{FileName, FileReference};
 pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use logfile::{detect_journal_clearing, parse_logfile, LogFileSummary, RestartArea};
+/// LZNT1 decompression, re-exported from the `lznt1` crate (the codec NTFS uses
+/// for compressed `$DATA`).
+pub use lznt1::decompress;
 pub use mft::{MftData, MftEntry};
 pub use mftmirr::{compare_mft_mirror, MirrorComparison};
 pub use record::{apply_fixup, MftRecordHeader};

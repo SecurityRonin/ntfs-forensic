@@ -1,6 +1,6 @@
 [package]
 name = "ntfs-forensic"
-version = "0.6.1"
+version = "0.7.0"
 edition = "2021"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -14,9 +14,9 @@ keywords = ["forensics", "ntfs", "dfir", "timestomp", "anti-forensics"]
 categories = ["parser-implementations", "filesystem"]
 
 [dependencies]
-ntfs-core = { version = "0.7.1", path = "../core" }
+ntfs-core = { version = "0.8.0", path = "../core" }
 # NTFS structure knowledge + the shared report model (Severity/Observation).
-forensicnomicon = "0.3.1"
+forensicnomicon = "0.5"
 # USN rule-engine regex matching + record timestamp formatting.
 regex = "1"
 chrono = "0.4"
