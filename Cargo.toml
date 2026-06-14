@@ -2,6 +2,32 @@
 resolver = "2"
 members = ["core", "forensic"]
 
+# Single source of truth for fields shared (identical) by every member (DRY).
+# `version` is NOT hoisted: core (0.8.0) and forensic (0.7.0) are versioned
+# independently, so each keeps its own `version` inline.
+[workspace.package]
+edition = "2021"
+rust-version = "1.85"
+license = "Apache-2.0"
+repository = "https://github.com/SecurityRonin/ntfs-forensic"
+homepage = "https://github.com/SecurityRonin/ntfs-forensic"
+authors = ["Albert Hui <albert@securityronin.com>"]
+categories = ["parser-implementations", "filesystem"]
+readme = "README.md"
+
+# Single source of truth for dependency versions (DRY): declare each once;
+# members write `dep.workspace = true`. The inter-crate `ntfs-core` version
+# lives here too, so a bump touches one line instead of every member.
+[workspace.dependencies]
+ntfs-core = { path = "core", version = "0.8.0" }
+forensicnomicon = "0.5"
+thiserror = "2"
+lznt1 = "0.1"
+bitflags = "2"
+chrono = "0.4"
+regex = "1"
+mft = "0.6"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 

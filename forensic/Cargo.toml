@@ -1,25 +1,25 @@
 [package]
 name = "ntfs-forensic"
 version = "0.7.0"
-edition = "2021"
-rust-version = "1.85"
-license = "Apache-2.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
 description = "Forensic anomaly auditor for NTFS — timestomping, alternate data streams, deleted records, and MFT-record slack as graded report::Finding, built on ntfs-core"
-repository = "https://github.com/SecurityRonin/ntfs-forensic"
-homepage = "https://github.com/SecurityRonin/ntfs-forensic"
+repository.workspace = true
+homepage.workspace = true
 documentation = "https://docs.rs/ntfs-forensic"
-readme = "README.md"
-authors = ["Albert Hui <albert@securityronin.com>"]
+readme.workspace = true
+authors.workspace = true
 keywords = ["forensics", "ntfs", "dfir", "timestomp", "anti-forensics"]
-categories = ["parser-implementations", "filesystem"]
+categories.workspace = true
 
 [dependencies]
-ntfs-core = { version = "0.8.0", path = "../core" }
+ntfs-core = { workspace = true }
 # NTFS structure knowledge + the shared report model (Severity/Observation).
-forensicnomicon = "0.5"
+forensicnomicon = { workspace = true }
 # USN rule-engine regex matching + record timestamp formatting.
-regex = "1"
-chrono = "0.4"
+regex = { workspace = true }
+chrono = { workspace = true }
 
 [lints]
 workspace = true
