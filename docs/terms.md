@@ -1,13 +1,28 @@
 # Terms of Service
 
-`ntfs-forensic` is provided under the [MIT License](https://github.com/SecurityRonin/ntfs-forensic/blob/main/LICENSE).
-The software is provided "as is", without warranty of any kind, express or
-implied. In no event shall the authors or copyright holders be liable for any
-claim, damages, or other liability arising from its use.
+*Last updated: 2026-06-15*
 
-You are responsible for ensuring that your use of this software — including the
-acquisition and analysis of any disk image or filesystem data — complies with all
-applicable laws and that you have authorisation to examine the material in
-question.
+## Licence
 
-© 2026 Security Ronin Ltd
+ntfs-forensic is released under the [Apache License 2.0](https://github.com/SecurityRonin/ntfs-forensic/blob/main/LICENSE). You may use, modify, and distribute it subject to the terms of that licence.
+
+## Acceptable Use
+
+You agree to use ntfs-forensic only for lawful purposes, including but not limited to:
+
+- Digital forensics investigations on systems you own or are authorised to examine
+- Incident response activities within your organisation
+- Security research and CTF competitions
+- Academic or educational use
+
+## No Warranty
+
+ntfs-forensic is provided "as is" without warranty of any kind. Security Ronin Ltd is not liable for any damages arising from use of this software.
+
+## Contact
+
+[security@securityronin.com](mailto:security@securityronin.com)
+
+---
+
+[Privacy Policy](privacy.md) · [Home](index.md) · © 2026 Security Ronin Ltd.

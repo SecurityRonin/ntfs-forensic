@@ -1,13 +1,27 @@
 # Privacy Policy
 
-`ntfs-forensic` is an offline Rust library. It performs no network communication,
-collects no telemetry, and transmits no data of any kind. All processing of disk
-images and filesystem artifacts happens entirely on your own machine, under your
-control.
+*Last updated: 2026-06-15*
 
-Because the software gathers nothing, there is nothing for us to store, share, or
-sell. Any data you process with it remains yours alone.
+## Summary
 
-For questions, contact [albert@securityronin.com](mailto:albert@securityronin.com).
+ntfs-forensic is a local Rust library. It does not collect, transmit, or store any personal data on remote servers.
 
-© 2026 Security Ronin Ltd
+## Data Access
+
+ntfs-forensic reads only the file bytes you pass to it. All processing happens in memory on your local machine. Nothing is uploaded anywhere.
+
+## Telemetry
+
+ntfs-forensic has **no telemetry**. It makes no network requests of any kind.
+
+## Open Source
+
+ntfs-forensic is open source (Apache-2.0). You can audit every line of code at [github.com/SecurityRonin/ntfs-forensic](https://github.com/SecurityRonin/ntfs-forensic).
+
+## Contact
+
+Privacy questions: [security@securityronin.com](mailto:security@securityronin.com)
+
+---
+
+[Terms of Service](terms.md) · [Home](index.md) · © 2026 Security Ronin Ltd.
