@@ -21,7 +21,7 @@
 //! - [`runlist::decode`] + [`data::read_attribute_value`] — data runs.
 //! - [`index`] — directory `$INDEX_ROOT` / INDX buffers.
 //! - [`attribute_list`] — fragmented-file extension records.
-//! - [`compress::decompress`] — LZNT1.
+//! - `decompress` — LZNT1 (`$DATA`) decompression, re-exported from the `lznt1` crate.
 //! - [`fs::NtfsFs`] — path resolution and file read over any `Read + Seek`.
 //! - [`source::OffsetReader`] — open a partition inside a whole-disk image.
 //! - `ntfs-forensic` (sibling crate) — Tier-2: timestomp, ADS, slack, deleted-record carving.

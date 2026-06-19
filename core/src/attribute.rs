@@ -514,6 +514,15 @@ mod tests {
     }
 
     #[test]
+    fn compression_unit_is_zero_for_resident_attribute() {
+        // A resident attribute is never stored in compression units → 0.
+        let attr = resident(attr_types::DATA, None, 0, b"inline");
+        let rec = record_with(0x38, &[attr]);
+        let a = &parse_attributes(&rec, 0x38).unwrap()[0];
+        assert_eq!(a.compression_unit(), 0);
+    }
+
+    #[test]
     fn end_marker_at_start_yields_no_attributes() {
         let rec = record_with(0x38, &[]);
         assert!(parse_attributes(&rec, 0x38).unwrap().is_empty());

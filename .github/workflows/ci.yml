@@ -124,7 +124,7 @@ jobs:
         run: cargo +nightly fuzz check
       - name: Smoke-fuzz each target (30s)
         run: |
-          for t in boot record attributes runlist index_buffer compress attribute_list; do
+          for t in boot record attributes runlist index_buffer attribute_list; do
             cargo +nightly fuzz run "$t" -- -max_total_time=30 -rss_limit_mb=4096
           done
 

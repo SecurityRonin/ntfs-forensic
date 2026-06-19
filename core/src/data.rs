@@ -196,8 +196,9 @@ fn read_compressed_runs<R: Read + Seek>(
                     .ok_or(NtfsError::BadRunlist("LCN byte offset overflow"))?;
                 let nbytes =
                     usize::try_from(take * cluster_size).map_err(|_| NtfsError::TooLarge {
-                        bytes: take * cluster_size,
-                    })?;
+                        bytes: take * cluster_size, // cov:unreachable: take*cluster_size ≤ unit_bytes (checked to fit u64); on 64-bit usize this conversion is infallible
+                    })?; // cov:unreachable: see the bytes line above — conversion never fails on 64-bit
+
                 reader.seek(SeekFrom::Start(byte_off))?;
                 let start = real_bytes.len();
                 real_bytes.resize(start + nbytes, 0);
@@ -487,6 +488,57 @@ mod tests {
             out, content,
             "compressed $DATA must be LZNT1-decompressed, not returned raw"
         );
+    }
+
+    #[test]
+    fn compressed_runs_fully_sparse_unit_is_zeroes() {
+        // A unit with no allocated clusters (real_clusters == 0) is a hole → zeroes.
+        let mut vol = std::io::Cursor::new(vec![0u8; 16 * 512]);
+        let runs = [Run {
+            length: 16,
+            lcn: None,
+        }];
+        let out = read_compressed_runs(&mut vol, &runs, 512, 100, 16).unwrap();
+        assert_eq!(out, vec![0u8; 100]);
+    }
+
+    #[test]
+    fn compressed_runs_fully_allocated_unit_is_verbatim() {
+        // A fully-allocated unit (real_clusters == unit_clusters) is stored
+        // uncompressed → copied verbatim, not run through the LZNT1 decoder.
+        let mut vol = std::io::Cursor::new(vec![0x5Au8; 16 * 512]);
+        let runs = [Run {
+            length: 16,
+            lcn: Some(0),
+        }];
+        let out = read_compressed_runs(&mut vol, &runs, 512, 16 * 512, 16).unwrap();
+        assert_eq!(out.len(), 16 * 512);
+        assert!(out.iter().all(|&b| b == 0x5A));
+    }
+
+    #[test]
+    fn compressed_runs_stop_when_runlist_exhausted() {
+        // real_size claims two units but the runlist provides only one → the walk
+        // stops at the runlist end (no panic, no infinite loop) and returns what
+        // it has.
+        let mut vol = std::io::Cursor::new(vec![0x11u8; 16 * 512]);
+        let runs = [Run {
+            length: 16,
+            lcn: Some(0),
+        }];
+        let out = read_compressed_runs(&mut vol, &runs, 512, 2 * 16 * 512, 16).unwrap();
+        assert_eq!(out.len(), 16 * 512, "only the available unit is returned");
+    }
+
+    #[test]
+    fn compressed_runs_reject_implausible_real_size() {
+        let mut vol = std::io::Cursor::new(vec![0u8; 16]);
+        let runs = [Run {
+            length: 1,
+            lcn: Some(0),
+        }];
+        let err = read_compressed_runs(&mut vol, &runs, 512, MAX_VALUE_BYTES + 1, 16);
+        assert!(matches!(err, Err(NtfsError::TooLarge { .. })));
     }
 
     #[test]
