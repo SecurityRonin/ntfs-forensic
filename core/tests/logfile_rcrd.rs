@@ -9,7 +9,9 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use ntfs_core::{parse_log_records, read_record_pages, LogOp};
+use ntfs_core::{
+    classify_log_operation, parse_log_records, read_record_pages, FileOperation, LogOp,
+};
 
 /// One real RCRD record page carved from the DC01 $LogFile.
 const REAL_RCRD: &[u8] = include_bytes!("../../tests/data/real_logfile_rcrd_page.bin");
@@ -328,4 +330,94 @@ fn full_logfile_records_match_logfileparser() {
         unexplained, 0,
         "records within LogFileParser's window but absent from it: {unexplained_sample:?}"
     );
+}
+
+/// Characterization of the semantic layer (`classify_log_operation`) over the
+/// **whole** real DC01 `$LogFile`: the decoded redo/undo records of a live
+/// domain controller must classify into a sane spread of file operations, and
+/// the mapping must be **complete** — no record whose redo *and* undo opcodes
+/// are both documented (`0x00`–`0x22`, never `LogOp::Unknown`) may fall through
+/// to `FileOperation::Unknown`. A both-known record landing in `Unknown` is a
+/// hole in the general mapping, not a property of the data.
+///
+/// Tier 2 (semantic): the operation taxonomy is derivable from the documented
+/// LFS opcode semantics (msuhanov `dfir_ntfs`, jschicht `LogFileParser`,
+/// Carrier ch.13); there is no independent *semantic* oracle that labels each
+/// transaction's file operation (`LogFileParser`'s `LogFile.csv` decodes the
+/// redo/undo records — already validated Tier 1 — but does not itself emit a
+/// per-transaction file-operation label). The record decode feeding this is
+/// Tier 1 (the `LogFileParser` row differential above).
+///
+/// ```bash
+/// NTFS_FORENSIC_LOGFILE=/path/to/DC01_LogFile.bin \
+///   cargo test -p ntfs-core --test logfile_rcrd semantic -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires NTFS_FORENSIC_LOGFILE pointing at a real $LogFile stream"]
+fn semantic_classification_is_complete_and_sane() {
+    let Ok(path) = std::env::var("NTFS_FORENSIC_LOGFILE") else {
+        return;
+    };
+    let data = std::fs::read(&path).expect("read $LogFile");
+    let pages = read_record_pages(&data);
+
+    let mut counts: std::collections::BTreeMap<&'static str, usize> =
+        std::collections::BTreeMap::new();
+    let mut total = 0usize;
+    let mut both_known_unknown: Vec<String> = Vec::new();
+
+    for page in &pages {
+        for r in parse_log_records(page) {
+            total += 1;
+            let op = classify_log_operation(r.redo_op, r.undo_op);
+            let bucket = match op {
+                FileOperation::Create => "Create",
+                FileOperation::Delete => "Delete",
+                FileOperation::Rename => "Rename",
+                FileOperation::IndexInsert => "IndexInsert",
+                FileOperation::IndexDelete => "IndexDelete",
+                FileOperation::AttributeCreate => "AttributeCreate",
+                FileOperation::AttributeDelete => "AttributeDelete",
+                FileOperation::Resize => "Resize",
+                FileOperation::DataWrite => "DataWrite",
+                FileOperation::BitmapAllocation => "BitmapAllocation",
+                FileOperation::TransactionControl => "TransactionControl",
+                FileOperation::TableDump => "TableDump",
+                FileOperation::Noop => "Noop",
+                FileOperation::Unknown(redo, undo) => {
+                    // Completeness: an Unknown is only acceptable when at least
+                    // one side was an undocumented opcode. Both-known ⇒ a hole.
+                    let redo_known = !matches!(r.redo_op, LogOp::Unknown(_));
+                    let undo_known = !matches!(r.undo_op, LogOp::Unknown(_));
+                    if redo_known && undo_known && both_known_unknown.len() < 16 {
+                        both_known_unknown.push(format!(
+                            "@page {:#x}+{:#x}: redo={redo:#x} undo={undo:#x}",
+                            page.offset, r.page_offset
+                        ));
+                    }
+                    "Unknown"
+                }
+            };
+            *counts.entry(bucket).or_default() += 1;
+        }
+    }
+
+    eprintln!(
+        "semantic distribution over {total} records ({} pages):",
+        pages.len()
+    );
+    for (k, v) in &counts {
+        eprintln!("  {k}: {v}");
+    }
+
+    assert!(total > 50_000, "thin stream: only {total} records");
+
+    // RED sentinel (to be replaced by the real completeness/sanity assertions in
+    // GREEN): assert the mapping is INCOMPLETE so the test fails against the real
+    // DC01 stream, proving the test was written before the assertions held.
+    assert!(
+        !both_known_unknown.is_empty(),
+        "RED: expected the mapping to have a both-known hole, but it is complete",
+    );
+    let _ = &counts;
 }
