@@ -9,10 +9,41 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use ntfs_core::read_record_pages;
+use ntfs_core::{parse_log_records, read_record_pages, LogOp};
 
 /// One real RCRD record page carved from the DC01 $LogFile.
 const REAL_RCRD: &[u8] = include_bytes!("../../tests/data/real_logfile_rcrd_page.bin");
+
+/// Decode the LFS log records in the real DC01 RCRD page and reconcile them
+/// against **LogFileParser** (jschicht, run under Wine) — the independent oracle.
+///
+/// This page is byte offset 0x2000 of the DC01 `$LogFile`; LogFileParser's
+/// `LogFile.csv` reports exactly one log record in it, at `lf_Offset 0x2200`
+/// (in-page 0x200): `lf_LSN=223672896` (0x0D54FA40), `lf_RedoOperation=`
+/// CompensationlogRecord, `lf_UndoOperation=`Noop, `lf_record_type=2`,
+/// `lf_transaction_id=0`. Every expected value below is the oracle's, not ours.
+#[test]
+fn parses_real_log_record_matching_logfileparser() {
+    let pages = read_record_pages(REAL_RCRD);
+    assert_eq!(pages.len(), 1, "the fixture is one RCRD page");
+    let records = parse_log_records(&pages[0]);
+
+    assert_eq!(
+        records.len(),
+        1,
+        "LogFileParser reports one record in this page"
+    );
+    let r = &records[0];
+    assert_eq!(
+        r.page_offset, 0x200,
+        "in-page offset (lf_Offset 0x2200 - page 0x2000)"
+    );
+    assert_eq!(r.this_lsn, 0x0D54_FA40, "lf_LSN = 223672896");
+    assert_eq!(r.redo_op, LogOp::CompensationLogRecord, "lf_RedoOperation");
+    assert_eq!(r.undo_op, LogOp::Noop, "lf_UndoOperation");
+    assert_eq!(r.record_type, 2, "lf_record_type");
+    assert_eq!(r.transaction_id, 0, "lf_transaction_id");
+}
 
 #[test]
 fn reads_real_rcrd_page_and_applies_usa_fixup() {

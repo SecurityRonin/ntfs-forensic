@@ -272,6 +272,47 @@ pub fn read_record_pages(data: &[u8]) -> Vec<RecordPage> {
     pages
 }
 
+/// One decoded LFS log record from a $LogFile RCRD page.
+///
+/// Combines the Log File Service record header (this/previous/undo LSNs, record
+/// type, transaction id) with the NTFS log-record operation descriptor that
+/// forms the record's client data: the redo/undo [`LogOp`], the target
+/// attribute (an index into the Open Attribute Table), and the target VCN.
+#[derive(Debug, Clone)]
+pub struct LogRecord {
+    /// Byte offset of this record within its [`RecordPage`]'s `data`.
+    pub page_offset: usize,
+    /// This record's log sequence number (LFS record header, offset 0x00).
+    pub this_lsn: u64,
+    /// The client's previous LSN (offset 0x08).
+    pub client_previous_lsn: u64,
+    /// The client's undo-next LSN (offset 0x10).
+    pub client_undo_next_lsn: u64,
+    /// LFS record type (offset 0x20): normal log record vs restart/checkpoint.
+    pub record_type: u32,
+    /// Transaction identifier (offset 0x24).
+    pub transaction_id: u32,
+    /// The redo operation (NTFS log-record offset 0x30 — the client data start).
+    pub redo_op: LogOp,
+    /// The undo operation (offset 0x32).
+    pub undo_op: LogOp,
+    /// Index into the Open Attribute Table identifying the target (offset 0x3C).
+    pub target_attribute: u16,
+    /// MFT cluster index of the target (offset 0x44).
+    pub mft_cluster_index: u16,
+    /// Target VCN (offset 0x48).
+    pub target_vcn: u64,
+}
+
+/// Walk and decode the LFS log records within a fixed-up [`RecordPage`].
+///
+/// Records run from the page's first-record offset to its `next_record_offset`,
+/// each advancing by the 0x30-byte LFS header plus its `client_data_length`,
+/// 8-byte aligned. Decodes the redo/undo operations via [`LogOp::from_u16`].
+pub fn parse_log_records(_page: &RecordPage) -> Vec<LogRecord> {
+    Vec::new()
+}
+
 /// Parse NTFS $LogFile data.
 ///
 /// Scans for restart areas (RSTR) and record pages (RCRD) to build
