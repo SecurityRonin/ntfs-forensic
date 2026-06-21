@@ -412,12 +412,29 @@ fn semantic_classification_is_complete_and_sane() {
 
     assert!(total > 50_000, "thin stream: only {total} records");
 
-    // RED sentinel (to be replaced by the real completeness/sanity assertions in
-    // GREEN): assert the mapping is INCOMPLETE so the test fails against the real
-    // DC01 stream, proving the test was written before the assertions held.
+    // Completeness — the load-bearing assertion: every both-known-opcode record
+    // is classified, never dropped into Unknown.
     assert!(
-        !both_known_unknown.is_empty(),
-        "RED: expected the mapping to have a both-known hole, but it is complete",
+        both_known_unknown.is_empty(),
+        "both-known-opcode records fell through to Unknown (mapping hole): {both_known_unknown:?}"
     );
-    let _ = &counts;
+
+    // Sanity — a live DC's log exercises every major file-operation class.
+    for class in [
+        "Create",
+        "Delete",
+        "Rename",
+        "DataWrite",
+        "IndexInsert",
+        "IndexDelete",
+        "AttributeCreate",
+        "AttributeDelete",
+        "Resize",
+        "TransactionControl",
+    ] {
+        assert!(
+            counts.get(class).copied().unwrap_or(0) > 0,
+            "expected at least one {class} on a live DC $LogFile",
+        );
+    }
 }

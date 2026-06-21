@@ -155,6 +155,70 @@ is a forensic capability, and the test proves these are genuinely pre-window
 (not random garbage and not a misparse, since their operation/type still decode
 cleanly).
 
+### `$LogFile` file-operation semantics (`FileOperation`) — Tier 2
+
+`classify_log_operation` maps each decoded LFS record's `(redo, undo)`
+[`LogOp`] pair to a higher-level [`FileOperation`] — file create, delete,
+rename, data-write, attribute create/delete, resize, index insert/delete,
+transaction control, table-dump, no-op — surfacing any unmapped pair verbatim as
+`Unknown(redo_code, undo_code)`.
+
+**Tier 2 (semantic), not Tier 1.** The mapping is the *general* per-opcode rule
+the authoritative LFS references document, transcribed from three independent
+primary sources (cited per-pattern in the unit tests and the module docs):
+
+- **msuhanov, [`dfir_ntfs/LogFile.py`](https://github.com/msuhanov/dfir_ntfs/blob/master/dfir_ntfs/LogFile.py)**
+  — the maintained NTFS journal parser; its `LOGGED_RESIDENT_UPDATES` /
+  `LOGGED_NONRESIDENT_UPDATES` lists and `NTFSOperations` table classify each
+  opcode by what it mutates.
+- **jschicht, [`LogFileParser`](https://github.com/jschicht/LogFileParser/blob/master/LogFileParser.au3)**
+  — `_SanityTest1` enumerates the *valid* `(redo, undo)` pairings
+  (`CreateAttribute`↔`DeleteAttribute`,
+  `AddIndexEntryAllocation`↔`DeleteIndexEntryAllocation`,
+  `UpdateFileNameAllocation`↔self, `SetBits`↔`ClearBits`, …) — the authority for
+  how the redo and undo opcodes compose.
+- **Brian Carrier, *File System Forensic Analysis* (2005), ch. 13** — the primary
+  forensic reference for `InitializeFileRecordSegment` ⇒ creation and
+  `DeallocateFileRecordSegment` ⇒ deletion.
+
+It is **Tier 2, not Tier 1**, because there is **no independent *semantic*
+oracle** that labels each transaction's file operation to differential against:
+`LogFileParser`'s `LogFile.csv` decodes the redo/undo *records* (validated Tier 1
+above) but emits no per-transaction file-operation label, and `NTFS-Log-Tracker`
+was not available to run on this host. The ground truth is therefore *derivable
+from the documented opcode semantics* — genuinely checked against three primary
+sources and exercised end-to-end on a real corpus, but the scenario is one we
+constructed, so it can miss real-world quirks. The *record decode* feeding the
+classifier is independently Tier 1 (the `LogFileParser` row differential).
+
+**Real-corpus characterization (DC01).**
+`core/tests/logfile_rcrd.rs::semantic_classification_is_complete_and_sane`
+(env-gated on `NTFS_FORENSIC_LOGFILE`) runs the classifier over the whole real
+CITADEL-DC01 `$LogFile` and asserts two properties:
+
+1. **Completeness** — no record whose redo *and* undo opcodes are both documented
+   (`0x00`–`0x22`, never `LogOp::Unknown`) falls through to
+   `FileOperation::Unknown`. A both-known record in `Unknown` would be a hole in
+   the general mapping. On DC01 the count is **0**.
+2. **Sanity** — a live domain controller's log exercises every major
+   file-operation class.
+
+Observed distribution over the **75,399** decoded records (4,470 pages):
+
+| FileOperation | Count | FileOperation | Count |
+|---|---|---|---|
+| Resize | 20,904 | DataWrite | 18,445 |
+| TransactionControl | 16,495 | Rename | 7,373 |
+| BitmapAllocation | 3,881 | TableDump | 1,811 |
+| IndexInsert | 1,427 | AttributeCreate | 1,254 |
+| IndexDelete | 1,159 | Delete | 1,075 |
+| AttributeDelete | 852 | Create | 517 |
+| Noop | 206 | **Unknown** | **0** |
+
+The load-bearing result is **Unknown = 0**: every redo/undo opcode the real DC01
+stream carries is a documented operation that the classifier maps — the mapping
+is complete over this corpus.
+
 ### Robustness — never panic, never over-read
 
 Every parser is fuzzed (seven `cargo-fuzz` targets: `boot`, `record`,
