@@ -12,7 +12,11 @@ readme.workspace = true
 authors.workspace = true
 keywords = ["forensics", "ntfs", "filesystem", "dfir", "mft"]
 categories.workspace = true
-exclude = ["/fuzz", "/.github", "/docs"]
+# Integration tests live under /tests and read fixtures from the repo-root
+# tests/data via include_bytes!("../../tests/data/..."), which is outside this
+# package. They are repo-CI artifacts, not consumer-facing — excluding them
+# keeps the published tarball self-contained (no out-of-package include paths).
+exclude = ["/fuzz", "/.github", "/docs", "/tests"]
 
 [dependencies]
 thiserror = { workspace = true }
