@@ -46,10 +46,10 @@ pub struct LogFileSummary {
 ///
 /// These are the NTFS log-file-service operations (Brian Carrier, *File System
 /// Forensic Analysis*). The code→operation mapping is transcribed verbatim from
-/// the `_SolveUndoRedoCodes` function in jschicht's LogFileParser — the exact
-/// lookup its GUI runs to label the RedoOP/UndoOP columns — so this enum's
+/// the `_SolveUndoRedoCodes` function in jschicht's `LogFileParser` — the exact
+/// lookup its GUI runs to label the `RedoOP`/`UndoOP` columns — so this enum's
 /// mapping is identical to that tool's by construction. Names use the canonical
-/// spelling (LogFileParser carries a few typos, e.g. "Segement"); the invariant
+/// spelling (`LogFileParser` carries a few typos, e.g. "Segement"); the invariant
 /// shared with the tool is the numeric code, not the label. A code outside the
 /// documented `0x00..=0x22` range is surfaced verbatim via [`LogOp::Unknown`],
 /// never silently mapped.
@@ -98,15 +98,112 @@ impl LogOp {
     /// Map a raw 16-bit redo/undo operation code to its operation.
     #[must_use]
     pub fn from_u16(code: u16) -> Self {
-        LogOp::Unknown(code)
+        use LogOp::{
+            AddIndexEntryAllocation, AddIndexEntryRoot, AttributeNamesDump,
+            ClearBitsInNonResidentBitMap, CommitTransaction, CompensationLogRecord,
+            CreateAttribute, DeallocateFileRecordSegment, DeleteAttribute, DeleteDirtyClusters,
+            DeleteIndexEntryAllocation, DeleteIndexEntryRoot, DirtyPageTableDump,
+            EndTopLevelAction, ForgetTransaction, HotFix, InitializeFileRecordSegment, Noop,
+            OpenAttributeTableDump, OpenNonResidentAttribute, PrepareTransaction,
+            SetBitsInNonResidentBitMap, SetIndexEntryVcnAllocation, SetIndexEntryVcnRoot,
+            SetNewAttributeSizes, TransactionTableDump, Unknown, UpdateFileNameAllocation,
+            UpdateFileNameRoot, UpdateMappingPairs, UpdateNonResidentValue,
+            UpdateRecordDataAllocation, UpdateRecordDataRoot, UpdateResidentValue,
+            WriteEndOfFileRecordSegment, WriteEndOfIndexBuffer,
+        };
+        match code {
+            0x00 => Noop,
+            0x01 => CompensationLogRecord,
+            0x02 => InitializeFileRecordSegment,
+            0x03 => DeallocateFileRecordSegment,
+            0x04 => WriteEndOfFileRecordSegment,
+            0x05 => CreateAttribute,
+            0x06 => DeleteAttribute,
+            0x07 => UpdateResidentValue,
+            0x08 => UpdateNonResidentValue,
+            0x09 => UpdateMappingPairs,
+            0x0A => DeleteDirtyClusters,
+            0x0B => SetNewAttributeSizes,
+            0x0C => AddIndexEntryRoot,
+            0x0D => DeleteIndexEntryRoot,
+            0x0E => AddIndexEntryAllocation,
+            0x0F => DeleteIndexEntryAllocation,
+            0x10 => WriteEndOfIndexBuffer,
+            0x11 => SetIndexEntryVcnRoot,
+            0x12 => SetIndexEntryVcnAllocation,
+            0x13 => UpdateFileNameRoot,
+            0x14 => UpdateFileNameAllocation,
+            0x15 => SetBitsInNonResidentBitMap,
+            0x16 => ClearBitsInNonResidentBitMap,
+            0x17 => HotFix,
+            0x18 => EndTopLevelAction,
+            0x19 => PrepareTransaction,
+            0x1A => CommitTransaction,
+            0x1B => ForgetTransaction,
+            0x1C => OpenNonResidentAttribute,
+            0x1D => OpenAttributeTableDump,
+            0x1E => AttributeNamesDump,
+            0x1F => DirtyPageTableDump,
+            0x20 => TransactionTableDump,
+            0x21 => UpdateRecordDataRoot,
+            0x22 => UpdateRecordDataAllocation,
+            other => Unknown(other),
+        }
     }
 
     /// The raw 16-bit operation code (inverse of [`LogOp::from_u16`]).
     #[must_use]
     pub fn code(self) -> u16 {
+        use LogOp::{
+            AddIndexEntryAllocation, AddIndexEntryRoot, AttributeNamesDump,
+            ClearBitsInNonResidentBitMap, CommitTransaction, CompensationLogRecord,
+            CreateAttribute, DeallocateFileRecordSegment, DeleteAttribute, DeleteDirtyClusters,
+            DeleteIndexEntryAllocation, DeleteIndexEntryRoot, DirtyPageTableDump,
+            EndTopLevelAction, ForgetTransaction, HotFix, InitializeFileRecordSegment, Noop,
+            OpenAttributeTableDump, OpenNonResidentAttribute, PrepareTransaction,
+            SetBitsInNonResidentBitMap, SetIndexEntryVcnAllocation, SetIndexEntryVcnRoot,
+            SetNewAttributeSizes, TransactionTableDump, Unknown, UpdateFileNameAllocation,
+            UpdateFileNameRoot, UpdateMappingPairs, UpdateNonResidentValue,
+            UpdateRecordDataAllocation, UpdateRecordDataRoot, UpdateResidentValue,
+            WriteEndOfFileRecordSegment, WriteEndOfIndexBuffer,
+        };
         match self {
-            LogOp::Unknown(c) => c,
-            _ => 0,
+            Noop => 0x00,
+            CompensationLogRecord => 0x01,
+            InitializeFileRecordSegment => 0x02,
+            DeallocateFileRecordSegment => 0x03,
+            WriteEndOfFileRecordSegment => 0x04,
+            CreateAttribute => 0x05,
+            DeleteAttribute => 0x06,
+            UpdateResidentValue => 0x07,
+            UpdateNonResidentValue => 0x08,
+            UpdateMappingPairs => 0x09,
+            DeleteDirtyClusters => 0x0A,
+            SetNewAttributeSizes => 0x0B,
+            AddIndexEntryRoot => 0x0C,
+            DeleteIndexEntryRoot => 0x0D,
+            AddIndexEntryAllocation => 0x0E,
+            DeleteIndexEntryAllocation => 0x0F,
+            WriteEndOfIndexBuffer => 0x10,
+            SetIndexEntryVcnRoot => 0x11,
+            SetIndexEntryVcnAllocation => 0x12,
+            UpdateFileNameRoot => 0x13,
+            UpdateFileNameAllocation => 0x14,
+            SetBitsInNonResidentBitMap => 0x15,
+            ClearBitsInNonResidentBitMap => 0x16,
+            HotFix => 0x17,
+            EndTopLevelAction => 0x18,
+            PrepareTransaction => 0x19,
+            CommitTransaction => 0x1A,
+            ForgetTransaction => 0x1B,
+            OpenNonResidentAttribute => 0x1C,
+            OpenAttributeTableDump => 0x1D,
+            AttributeNamesDump => 0x1E,
+            DirtyPageTableDump => 0x1F,
+            TransactionTableDump => 0x20,
+            UpdateRecordDataRoot => 0x21,
+            UpdateRecordDataAllocation => 0x22,
+            Unknown(c) => c,
         }
     }
 }
@@ -294,9 +391,9 @@ mod tests {
     use super::*;
 
     /// The complete code→operation mapping, transcribed verbatim from
-    /// LogFileParser's `_SolveUndoRedoCodes` (the function its GUI runs). Index =
+    /// `LogFileParser`'s `_SolveUndoRedoCodes` (the function its GUI runs). Index =
     /// the raw opcode; this is the authoritative reference `LogOp::from_u16` must
-    /// reproduce exactly. Canonical spelling differs from LogFileParser's typos
+    /// reproduce exactly. Canonical spelling differs from `LogFileParser`'s typos
     /// (e.g. its "Segement"); the shared invariant is the numeric code, asserted
     /// here as the variant identity.
     const LFP_OPS: [LogOp; 35] = [
@@ -343,14 +440,14 @@ mod tests {
             assert_eq!(
                 LogOp::from_u16(code as u16),
                 expected,
-                "opcode {code:#04x} must map to LogFileParser's operation"
+                "opcode {code:#04x} must map to `LogFileParser`'s operation"
             );
         }
     }
 
     #[test]
     fn logop_unknown_surfaces_the_raw_code() {
-        // 0x23 is LogFileParser's internal "JS_NewEndOfRecord" marker, not a real
+        // 0x23 is `LogFileParser`'s internal "JS_NewEndOfRecord" marker, not a real
         // NTFS operation; it and anything above the documented range are Unknown.
         assert_eq!(LogOp::from_u16(0x23), LogOp::Unknown(0x23));
         assert_eq!(LogOp::from_u16(0xFFFF), LogOp::Unknown(0xFFFF));
