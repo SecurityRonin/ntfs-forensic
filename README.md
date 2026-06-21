@@ -151,7 +151,7 @@ for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
 | `compare_mft_mirror` / `parse_logfile` / `detect_journal_clearing` | `$MFTMirr` / `$LogFile` parsing primitives |
 | `read_record_pages` / `parse_log_records` / `LogOp` | `$LogFile` RCRD pages (USA fixup) → decoded LFS redo/undo records |
 | `classify_log_operation` / `FileOperation` | Map a record's `(redo, undo)` op pair → file operation (create / delete / rename / data-write / attribute / index / transaction control) |
-| `reconstruct_transactions` / `Transaction` / `TransactionState` | Group decoded LFS records into transactions by `transaction_id` (the analyst's unit — one user/OS action), each in LSN order, classed `Committed` / `Aborted` / `Incomplete` from the commit / forget / compensation opcodes |
+| `reconstruct_transactions` / `Transaction` / `TransactionState` | Reconstruct individual transactions (the analyst's unit — one user/OS action): partition records by the reused `transaction_id` table slot, then split each slot's LSN-ordered stream at every commit/forget terminal; classed `Committed` / `Aborted` / `Incomplete`. Validated on real DC01 vs LogFileParser (15,330 transactions, zero slot-misplacements) |
 | `parse_usn_record_v2` / `parse_usn_journal` / `UsnRecord` / `UsnReason` / `FileAttributes` | Decode `$UsnJrnl:$J` change-journal records (V2/V3) — each event's MFT + parent-MFT reference, reason flags, filename, attributes, and timestamp |
 | `UsnJournalReader` | Streaming, low-memory iterator over a `$J` stream too large to load whole |
 | `carve_usn_records` | Recover USN records from journal slack and unallocated space |

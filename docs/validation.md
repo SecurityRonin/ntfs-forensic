@@ -219,59 +219,101 @@ The load-bearing result is **Unknown = 0**: every redo/undo opcode the real DC01
 stream carries is a documented operation that the classifier maps — the mapping
 is complete over this corpus.
 
-### `$LogFile` transaction reconstruction — Tier 1 differential (per-txid LSN membership)
+### `$LogFile` transaction reconstruction
 
 `reconstruct_transactions` groups the decoded LFS records into transactions — the
 unit a forensic analyst reasons about (one user/OS action = one transaction of
-redo/undo records). NTFS keys this grouping on the **`transaction_id`** field
-(LFS record header offset `0x24`), which the Microsoft `LFS_RECORD` layout and
-the flatcap `linux-ntfs` `$LogFile` docs describe as the field that "groups
-related records into a single transaction". Records of concurrent transactions
-are *interleaved* in LSN order, so contiguity does not bound a transaction; the
-`transaction_id` does (TZWorks `mala` users guide: "each record has a pointer to
-the previous record in the chain for its transaction … consecutive records can be
-interleaved between multiple transactions"). The `client_previous_lsn` /
-`client_undo_next_lsn` back-pointers are the redo/undo *replay* chain, not the
-grouping key. Each transaction's state is read from the bounding control opcodes:
-`CommitTransaction` (0x1A) / `ForgetTransaction` (0x1B) ⇒ **Committed** (a commit
-overrides a compensation), `CompensationLogRecord` (0x01) alone ⇒ **Aborted**,
-neither ⇒ **Incomplete**. Sources: Microsoft `LFS_RECORD` / flatcap
+redo/undo records).
+
+**`transaction_id` is a reused table slot, not a unique id.** The 4-byte field at
+LFS record-header offset `0x24` (`TransactionId` in the Microsoft `LFS_RECORD`
+layout) is the index of the transaction's entry in NTFS's in-memory *open
+transaction table*, and that slot is **recycled** as transactions commit and new
+ones begin. On the real CITADEL-DC01 `$LogFile` `LogFileParser` reports only
+**8 distinct values** across its 78,765 rows (the busiest slot, `0x40`, holds
+26,274), so a single value spans thousands of distinct logical transactions.
+Grouping purely on
+`transaction_id` would yield 8 giant *slot* groups, not transactions — so the
+reconstruction is **two-level**:
+
+1. **Slot** — partition records by `transaction_id` (the table slot). This is what
+   `LogFileParser`'s `lf_transaction_id` column reports.
+2. **Transaction** — within each slot, in LSN order, a transaction is the run of
+   records up to and including a **terminal** redo: `CommitTransaction` (0x1A) or
+   `ForgetTransaction` (0x1B). A new run begins after each terminal (the slot is
+   reused). A `CompensationLogRecord` (0x01) redo in a run with no terminal ⇒
+   **Aborted**; a terminal seals the run ⇒ **Committed** (a terminal wins over a
+   compensation); a trailing un-terminated run ⇒ **Incomplete**. The terminal /
+   abort opcode is read on the **redo** side only — NTFS writes a `Forget` with
+   `undo = CompensationLogRecord` by construction, so reading the undo field would
+   make every Forget-sealed transaction look aborted.
+
+The `client_previous_lsn` / `client_undo_next_lsn` back-pointers are the redo/undo
+*replay* chain, not the grouping key. Sources: Microsoft `LFS_RECORD` / flatcap
 [`$LogFile` docs](https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html);
-TZWorks [`mala` users guide](https://tzworks.com/prototypes/mala/mala.users.guide.pdf);
-msuhanov [`dfir_ntfs/LogFile.py`](https://github.com/msuhanov/dfir_ntfs/blob/master/dfir_ntfs/LogFile.py);
+TZWorks [`mala` users guide](https://tzworks.com/prototypes/mala/mala.users.guide.pdf)
+("records … interleaved between multiple transactions"); msuhanov
+[`dfir_ntfs/LogFile.py`](https://github.com/msuhanov/dfir_ntfs/blob/master/dfir_ntfs/LogFile.py);
 Brian Carrier, *File System Forensic Analysis* (2005), ch. 13.
 
-**Why Tier 1.** `LogFileParser`'s `LogFile.csv` carries an `lf_transaction_id`
-column — an *independent tool's* transaction assignment for the same real stream.
+The two levels are validated at two different tiers by
 `core/tests/logfile_rcrd.rs::transaction_membership_matches_logfileparser`
-(env-gated on `NTFS_FORENSIC_LOGFILE` + `NTFS_FORENSIC_LOGFILE_CSV`) groups the
-oracle rows by `lf_transaction_id`, groups our records by `reconstruct_transactions`,
-and reconciles the two **per transaction id by the SET of record LSNs** assigned
-to it. The comparison joins on LSN (each LSN is the record's globally-unique
-identity), so it is immune to the table-dump `lf_Offset` shift documented in the
-record differential above — only *which LSNs go in which transaction* is compared,
-never byte offsets.
+(env-gated on `NTFS_FORENSIC_LOGFILE` + `NTFS_FORENSIC_LOGFILE_CSV`):
 
-The reconciliation isolates the circular-buffer artifacts from genuine
-disagreement, exactly as the record differential does:
+**Level 1 — slot placement vs LogFileParser — Tier 1.** `LogFileParser`'s
+`LogFile.csv` carries the `lf_transaction_id` column — an *independent tool's*
+slot assignment for the same real stream. The differential builds a reverse index
+LSN → oracle-slot, then checks every record we recovered: the slot we placed it in
+must equal the slot the oracle placed it in. The join is on LSN (each LSN is the
+record's globally-unique identity), so it is immune to the table-dump `lf_Offset`
+shift. The check is *placement precision* (charged per-record on the records we
+have), directional on purpose — see the recall note below.
 
-- **stale** — records whose LSN is below the oracle's oldest tracked LSN are
-  prior-generation residue `LogFileParser` filters and we carve; they are excluded
-  from the per-txid set comparison (a recovery capability, not an error — see the
-  "Stale prior-generation residue" note above).
-- **`oracle_extra`** — an LSN the oracle never lists anywhere is recovery, not a
-  grouping error; an LSN the oracle lists under a *different* txid is a genuine
-  membership divergence and is the only thing counted against agreement.
+**Level 2 — per-transaction split — Tier 2 (structural).** `LogFileParser` exposes
+only the slot, so there is **no independent per-transaction oracle**. The
+terminal-bounded split is validated structurally against its own definition: every
+record lands in exactly one transaction (partition); each slot's transactions
+concatenate back to exactly that slot's LSN-ordered record stream (contiguous,
+non-interleaved, complete); within a transaction LSNs are non-decreasing
+(duplicates allowed — see below); and each transaction ends at a terminal redo or
+is the slot's trailing `Incomplete` / `Aborted` run. These are
+derivable-from-construction properties, genuinely checked on real data but with a
+scenario we constructed, hence Tier 2. The record decode and LSN identity beneath
+both levels are themselves Tier 1 (the `LogFileParser` row differential above).
 
-The load-bearing assertions are that the grouping **drops no record on the real
-stream** (every decoded record lands in exactly one transaction) and that the
-in-window per-txid LSN membership agrees with `LogFileParser` for the overwhelming
-majority (`> 0.98`). Any residual divergence — transactions whose boundary fell in
-an overwritten region of the wrap, or records the two tools window differently — is
-printed (`exact` / `divergent` / `absent_txid` / `stale_records` /
-`oracle_unseen_extra` counts plus a sample) and characterized, never silently
-tolerated. The record decode and LSN identity this reconciliation rests on are
-themselves Tier 1 (the `LogFileParser` row differential above).
+**Result on the real DC01 `$LogFile`:**
+
+| Metric | Value | Meaning |
+|---|---|---|
+| slots (ours / oracle) | **8 / 8** | the reused table-slot count agrees |
+| `placed_ok` | **75,387** | records placed in the slot `LogFileParser` assigns |
+| `misplaced` | **0** | records placed in a *different* slot than the oracle |
+| transactions reconstructed | **15,330** | terminal-bounded runs (vs the 8 slot-groups) |
+| — committed / aborted / incomplete | 15,329 / 1 / 0 | sealed by a Forget terminal; one rolled back |
+| `stale_records` | 12 | prior-generation residue below the oracle's window |
+| `oracle_only_recall_gap` | 3,366 | in-window records `LogFileParser` surfaces that our reader does not |
+
+The load-bearing Level-1 claim is **`misplaced == 0`**: every record we recovered
+that `LogFileParser` also knows is in the slot `LogFileParser` assigns it to. The
+**15,330** reconstructed transactions track the **15,468** `ForgetTransaction`
+terminals in the stream (the small difference is terminals on stale / pre-window
+records), confirming the split yields meaningful per-action transactions rather
+than 8 slot-buckets.
+
+**Two honestly-reported asymmetries, neither a grouping error:**
+
+- **`oracle_only_recall_gap` (reader recall, not grouping).** `LogFileParser`
+  follows the restart/LSN chain and surfaces ~3.4k more in-window records than our
+  page-walk reader recovers. This is the reader's recall, measured and reported but
+  not charged against the transaction layer — the record differential's
+  `unexplained == 0` proves we add nothing the oracle lacks, so our recovered set is
+  a near-subset placed perfectly.
+- **Duplicate LSNs within a slot (circular-buffer residue).** The `$LogFile` is a
+  circular buffer; a wrapped page and a current page can both physically hold a
+  record at the same LSN. On DC01 slot `0x68` carries 667 such duplicate-LSN
+  records and slot `0x40` carries 23. These are recoverable prior-generation
+  residue, so the within-transaction LSN order is asserted *non-decreasing*, not
+  strictly ascending.
 
 > Run the differential after extracting the real DC01 `$LogFile` and producing
 > `LogFile.csv` per the LogFileParser/Wine recipe under "Reproducing the
