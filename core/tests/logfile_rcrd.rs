@@ -15,12 +15,12 @@ use ntfs_core::{parse_log_records, read_record_pages, LogOp};
 const REAL_RCRD: &[u8] = include_bytes!("../../tests/data/real_logfile_rcrd_page.bin");
 
 /// Decode the LFS log records in the real DC01 RCRD page and reconcile them
-/// against **LogFileParser** (jschicht, run under Wine) — the independent oracle.
+/// against **`LogFileParser`** (jschicht, run under Wine) — the independent oracle.
 ///
-/// This page is byte offset 0x2000 of the DC01 `$LogFile`; LogFileParser's
+/// This page is byte offset 0x2000 of the DC01 `$LogFile`; `LogFileParser`'s
 /// `LogFile.csv` reports exactly one log record in it, at `lf_Offset 0x2200`
 /// (in-page 0x200): `lf_LSN=223672896` (0x0D54FA40), `lf_RedoOperation=`
-/// CompensationlogRecord, `lf_UndoOperation=`Noop, `lf_record_type=2`,
+/// `CompensationlogRecord`, `lf_UndoOperation=`Noop, `lf_record_type=2`,
 /// `lf_transaction_id=0`. Every expected value below is the oracle's, not ours.
 #[test]
 fn parses_real_log_record_matching_logfileparser() {
@@ -31,7 +31,7 @@ fn parses_real_log_record_matching_logfileparser() {
     assert_eq!(
         records.len(),
         1,
-        "LogFileParser reports one record in this page"
+        "`LogFileParser` reports one record in this page"
     );
     let r = &records[0];
     assert_eq!(

@@ -309,8 +309,61 @@ pub struct LogRecord {
 /// Records run from the page's first-record offset to its `next_record_offset`,
 /// each advancing by the 0x30-byte LFS header plus its `client_data_length`,
 /// 8-byte aligned. Decodes the redo/undo operations via [`LogOp::from_u16`].
-pub fn parse_log_records(_page: &RecordPage) -> Vec<LogRecord> {
-    Vec::new()
+pub fn parse_log_records(page: &RecordPage) -> Vec<LogRecord> {
+    use crate::bytes::{le_u16, le_u32, le_u64};
+
+    /// LFS record header length; the NTFS log-record (client data) starts here.
+    const LFS_HEADER_LEN: usize = 0x30;
+
+    let data = &page.data;
+    // The record stream ends at `next_record_offset` (the first free byte), in the
+    // RCRD page header at offset 0x18. Cap at the page length if it is out of range.
+    let end = (le_u16(data, 0x18) as usize).min(data.len());
+    // Every LSN in a page is <= the page's last_lsn (header offset 0x08); this lets
+    // us reject leading bytes (padding, or a record continued from the previous
+    // page) that coincidentally look like a record header.
+    let page_last_lsn = le_u64(data, 0x08);
+
+    let mut records = Vec::new();
+    let mut off = LFS_HEADER_LEN.max(0x40); // data area begins after the 0x40 page header
+    while off + LFS_HEADER_LEN <= end {
+        let this_lsn = le_u64(data, off);
+        let record_type = le_u32(data, off + 0x20);
+        let redo_raw = le_u16(data, off + 0x30);
+        let client_data_length = le_u32(data, off + 0x18) as usize;
+
+        // A genuine record start: a non-zero LSN within the page's range, a known
+        // LFS record type, a documented redo opcode, and a record that fits.
+        let plausible = this_lsn != 0
+            && this_lsn <= page_last_lsn
+            && (record_type == 1 || record_type == 2)
+            && redo_raw <= 0x22
+            && off + LFS_HEADER_LEN + client_data_length <= data.len();
+        if !plausible {
+            off += 8; // leading padding / cross-page continuation — skip, stay aligned
+            continue;
+        }
+
+        records.push(LogRecord {
+            page_offset: off,
+            this_lsn,
+            client_previous_lsn: le_u64(data, off + 0x08),
+            client_undo_next_lsn: le_u64(data, off + 0x10),
+            record_type,
+            transaction_id: le_u32(data, off + 0x24),
+            redo_op: LogOp::from_u16(redo_raw),
+            undo_op: LogOp::from_u16(le_u16(data, off + 0x32)),
+            target_attribute: le_u16(data, off + 0x3C),
+            mft_cluster_index: le_u16(data, off + 0x44),
+            target_vcn: le_u64(data, off + 0x48),
+        });
+
+        // Advance past the LFS header + client data, 8-byte aligned.
+        let advance = (LFS_HEADER_LEN + client_data_length + 7) & !7;
+        off += advance.max(8);
+    }
+
+    records
 }
 
 /// Parse NTFS $LogFile data.
@@ -584,6 +637,82 @@ mod tests {
         assert_eq!(pages.len(), 1);
         assert_eq!(pages[0].offset, LOG_PAGE_SIZE);
         assert_eq!(pages[0].last_lsn, 0xBEEF);
+    }
+
+    /// Build a `RecordPage` holding the given LFS records starting at `first_off`.
+    /// Each record = (`this_lsn`, `record_type`, `transaction_id`, redo, undo, cdl).
+    /// Sets the page `last_lsn` and the header's `next_record_offset` so the walk
+    /// bounds are correct. (The real-data equivalent is `core/tests/logfile_rcrd.rs`,
+    /// reconciled against `LogFileParser`; these synthetic pages drive lib coverage.)
+    fn page_with_records(
+        last_lsn: u64,
+        first_off: usize,
+        recs: &[(u64, u32, u32, u16, u16, u32)],
+    ) -> RecordPage {
+        let mut data = vec![0u8; LOG_PAGE_SIZE];
+        data[0..4].copy_from_slice(RCRD_SIGNATURE);
+        data[0x08..0x10].copy_from_slice(&last_lsn.to_le_bytes());
+        let mut off = first_off;
+        for &(lsn, rt, txid, redo, undo, cdl) in recs {
+            data[off..off + 8].copy_from_slice(&lsn.to_le_bytes());
+            data[off + 0x18..off + 0x1c].copy_from_slice(&cdl.to_le_bytes());
+            data[off + 0x20..off + 0x24].copy_from_slice(&rt.to_le_bytes());
+            data[off + 0x24..off + 0x28].copy_from_slice(&txid.to_le_bytes());
+            data[off + 0x30..off + 0x32].copy_from_slice(&redo.to_le_bytes());
+            data[off + 0x32..off + 0x34].copy_from_slice(&undo.to_le_bytes());
+            off += ((0x30 + cdl as usize + 7) & !7).max(8);
+        }
+        data[0x18..0x1a].copy_from_slice(&u16::try_from(off).unwrap_or(0).to_le_bytes());
+        RecordPage {
+            offset: 0,
+            last_lsn,
+            data,
+        }
+    }
+
+    #[test]
+    fn parse_log_records_decodes_record_fields() {
+        let page = page_with_records(5000, 0x40, &[(4200, 1, 7, 0x02, 0x00, 64)]);
+        let recs = parse_log_records(&page);
+        assert_eq!(recs.len(), 1);
+        let r = &recs[0];
+        assert_eq!(r.page_offset, 0x40);
+        assert_eq!(r.this_lsn, 4200);
+        assert_eq!(r.record_type, 1);
+        assert_eq!(r.transaction_id, 7);
+        assert_eq!(r.redo_op, LogOp::InitializeFileRecordSegment);
+        assert_eq!(r.undo_op, LogOp::Noop);
+    }
+
+    #[test]
+    fn parse_log_records_skips_leading_padding() {
+        // A record that does not begin at the 0x40 data area: 0x40..0x100 is zero
+        // padding (a cross-page continuation / unused), the record starts at 0x100.
+        let page = page_with_records(5000, 0x100, &[(4300, 2, 0, 0x01, 0x00, 80)]);
+        let recs = parse_log_records(&page);
+        assert_eq!(recs.len(), 1);
+        assert_eq!(recs[0].page_offset, 0x100);
+        assert_eq!(recs[0].redo_op, LogOp::CompensationLogRecord);
+    }
+
+    #[test]
+    fn parse_log_records_walks_multiple() {
+        let page = page_with_records(
+            5000,
+            0x40,
+            &[(4100, 1, 1, 0x02, 0x00, 32), (4150, 1, 1, 0x13, 0x00, 48)],
+        );
+        let recs = parse_log_records(&page);
+        assert_eq!(recs.len(), 2);
+        assert_eq!(recs[0].this_lsn, 4100);
+        assert_eq!(recs[1].this_lsn, 4150);
+        assert_eq!(recs[1].redo_op, LogOp::UpdateFileNameRoot);
+    }
+
+    #[test]
+    fn parse_log_records_empty_region() {
+        // next_record_offset == the data area → the record region is empty.
+        assert!(parse_log_records(&page_with_records(5000, 0x40, &[])).is_empty());
     }
 
     #[test]
