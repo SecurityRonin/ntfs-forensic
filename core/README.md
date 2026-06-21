@@ -62,7 +62,7 @@ for resolved in engine.rewind(&ntfs_core::usn::parse_usn_journal(&usn_bytes)?) {
 
 ## Trust, but verify
 
-`#![forbid(unsafe_code)]`; panic-free on crafted input (the workspace denies `clippy::unwrap_used` / `expect_used` in production code, every length and offset bounds-checked); fuzzed with seven `cargo-fuzz` targets; the boot parser is cross-validated against The Sleuth Kit on a real disk image and MFT parsing against the `mft` crate as an independent oracle; 100% line coverage enforced in CI.
+`#![forbid(unsafe_code)]`; panic-free on crafted input (the workspace denies `clippy::unwrap_used` / `expect_used` in production code, every length and offset bounds-checked); fuzzed with seven `cargo-fuzz` targets; validated against independent oracles on real third-party corpora — The Sleuth Kit (boot geometry, LZNT1 plaintext), the `mft` crate (`$MFT` parsing), and TSK extraction plus a differential page census for the `$LogFile` RCRD reader ([full evidence + tiers](https://securityronin.github.io/ntfs-forensic/validation/)); 100% line coverage enforced in CI.
 
 ## Forensic analysis
 

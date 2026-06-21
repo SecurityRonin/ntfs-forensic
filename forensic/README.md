@@ -73,7 +73,7 @@ This crate is the **analyzer**; the **reader** is [`ntfs-core`](https://crates.i
 
 ## Trust, but verify
 
-Built for untrusted disk images from potentially compromised systems: `#![forbid(unsafe_code)]`; panic-free on crafted input (the workspace denies `clippy::unwrap_used` / `expect_used` in production code); `ntfs-core` is fuzzed with seven `cargo-fuzz` targets, cross-validated against The Sleuth Kit and the `mft` crate on real disk images, and held at 100% line coverage in CI.
+Built for untrusted disk images from potentially compromised systems: `#![forbid(unsafe_code)]`; panic-free on crafted input (the workspace denies `clippy::unwrap_used` / `expect_used` in production code); `ntfs-core` is fuzzed with seven `cargo-fuzz` targets, validated against independent oracles on real third-party corpora — The Sleuth Kit, the `mft` crate, and a differential page census for the `$LogFile` RCRD reader ([full evidence + tiers](https://securityronin.github.io/ntfs-forensic/validation/)) — and held at 100% line coverage in CI.
 
 ---
 

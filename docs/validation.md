@@ -25,8 +25,8 @@ whether the data is "synthetic":
   data. Genuinely checked, but we chose the scenario.
 - **Tier 3** — fixture and expected answer both authored here, nothing
   independent vouching. Used only for per-branch coverage, never as a
-  correctness claim. (The "LZNT1 trap": a self-encoded round trip passes while
-  both encoder and decoder are wrong — see below for why this crate avoids it.)
+  correctness claim: a self-consistent round trip proves internal consistency,
+  not correctness against real-world bytes.
 
 ## Independent oracles
 
@@ -37,7 +37,7 @@ whether the data is "synthetic":
 | **`mft` crate** (omerbenamram) | Yes — independent Rust MFT parser | `$MFT` record in-use / is-directory flags and `$FILE_NAME` set, per record | 1 |
 | **LogFileParser** (jschicht, MIT, via Wine) | Yes — separate AutoIt tool | `$LogFile` transaction decode (designated oracle for the in-progress redo/undo work) | 1 |
 | **In-test RCRD census** | Independent *code path* (flat page-aligned signature scan, no fixup) | `read_record_pages` recovered exactly the RCRD pages present, each USA-valid | 2 |
-| **`lznt1` crate** | Yes — vetted third-party codec we reuse | The LZNT1 decode itself (we did not hand-roll the codec) | 1 |
+| **`lznt1` crate** | Yes — vetted third-party codec we reuse | The LZNT1 decode itself (a maintained, audited codec) | 1 |
 
 Two independent *extractors* are also cross-checked against each other: TSK
 `icat -o <lba> <image> 2` and `ntfs-forensic`'s own `$LogFile` extraction produce
@@ -66,14 +66,13 @@ CON 2018 `MaxPowers` image and asserts every field against the values **TSK
 `fsstat` derived independently**: 512-byte sectors, 4096-byte clusters, 1024-byte
 MFT entries, MFT at LCN 786 432, MFTMirr at LCN 2, serial `326C195B6C191B65`.
 
-### LZNT1 decompression — Tier 1 (the LZNT1 trap, avoided)
+### LZNT1 decompression — Tier 1
 
 `core/tests/lznt1_real.rs` validates the LZNT1 codec against a **real on-disk
 compressed `$DATA` stream** (CITADEL-DC01 inode 437) whose plaintext is produced
-**by TSK `icat`**, not by us. A self-encoded round trip would pass even with an
-inverted bit-split (both sides wrong); decoding a real Windows-written stream and
-matching TSK's plaintext byte-for-byte is what actually proves correctness. The
-codec is also a vetted third-party crate (`lznt1`), not a hand-rolled decoder.
+independently **by TSK `icat`**. Decoding a stream that real Windows wrote and
+matching TSK's plaintext byte-for-byte establishes correctness against real-world
+bytes. The codec itself is the vetted third-party `lznt1` crate.
 
 ### `$MFT` record parsing — Tier 1
 
