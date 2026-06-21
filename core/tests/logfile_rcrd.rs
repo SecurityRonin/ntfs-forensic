@@ -10,7 +10,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
 use ntfs_core::{
-    classify_log_operation, parse_log_records, read_record_pages, FileOperation, LogOp,
+    classify_log_operation, parse_log_records, read_record_pages, reconstruct_transactions,
+    FileOperation, LogOp,
 };
 
 /// One real RCRD record page carved from the DC01 $LogFile.
@@ -437,4 +438,188 @@ fn semantic_classification_is_complete_and_sane() {
             "expected at least one {class} on a live DC $LogFile",
         );
     }
+}
+
+/// Per-transaction LSN-membership differential against `LogFileParser`: for every
+/// transaction id `reconstruct_transactions` builds from the real DC01 `$LogFile`,
+/// the SET of record LSNs it assigns to that txid must match the SET
+/// `LogFileParser`'s `LogFile.csv` assigns to the same `lf_transaction_id`.
+///
+/// **Join on LSN, group on txid.** The record's LSN is its globally-unique
+/// identity (see `full_logfile_records_match_logfileparser`), so comparing the
+/// *set of LSNs* per transaction is immune to `LogFileParser`'s table-dump
+/// `lf_Offset` shift — we never compare byte offsets here, only which LSNs each
+/// tool places in each transaction. Records the two tools see differently in the
+/// circular-buffer wrap are isolated rather than failing the run:
+///
+/// - **stale** — a record we recover whose LSN is below the oracle's oldest
+///   tracked LSN: prior-generation residue `LogFileParser` filters and we carve
+///   (documented in `validation.md`). Excluded from the per-txid comparison.
+/// - **`oracle_extra`** — an LSN the oracle lists for a txid that is absent from
+///   our stream entirely (a record in a page region our reader did not surface).
+///
+/// The load-bearing assertion is that for the overwhelming majority of
+/// transaction ids the in-window LSN membership agrees exactly.
+///
+/// Tier 1 *input* (the record decode + LSN identity are validated against
+/// `LogFileParser` above); the transaction grouping reconciled here is checked
+/// against `LogFileParser`'s own `lf_transaction_id` column — an independent
+/// tool's transaction assignment on the same real stream.
+///
+/// ```bash
+/// NTFS_FORENSIC_LOGFILE=DC01_LogFile.bin \
+/// NTFS_FORENSIC_LOGFILE_CSV=LogFile.csv \
+///   cargo test -p ntfs-core --test logfile_rcrd transaction_membership -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "requires NTFS_FORENSIC_LOGFILE + NTFS_FORENSIC_LOGFILE_CSV"]
+fn transaction_membership_matches_logfileparser() {
+    use std::collections::{HashMap, HashSet};
+
+    let Ok(lf_path) = std::env::var("NTFS_FORENSIC_LOGFILE") else {
+        return;
+    };
+    let Ok(csv_path) = std::env::var("NTFS_FORENSIC_LOGFILE_CSV") else {
+        return;
+    };
+    let data = std::fs::read(&lf_path).expect("read $LogFile");
+    let csv = std::fs::read_to_string(&csv_path).expect("read LogFile.csv");
+
+    // Index the oracle CSV (pipe-delimited): for each lf_transaction_id, the set
+    // of lf_LSN values it lists. Also record every LSN the oracle knows, so we
+    // can tell "the oracle puts this LSN in a different txid" from "the oracle
+    // has never heard of this LSN".
+    let mut lines = csv.lines();
+    let header: Vec<&str> = lines.next().expect("csv header").split('|').collect();
+    let col = |n: &str| {
+        header
+            .iter()
+            .position(|h| *h == n)
+            .unwrap_or_else(|| panic!("missing column {n}"))
+    };
+    let (c_lsn, c_tx) = (col("lf_LSN"), col("lf_transaction_id"));
+
+    let mut oracle_txid_lsns: HashMap<u32, HashSet<u64>> = HashMap::new();
+    let mut oracle_all_lsns: HashSet<u64> = HashSet::new();
+    for line in lines {
+        let f: Vec<&str> = line.split('|').collect();
+        if f.len() <= c_tx.max(c_lsn) {
+            continue;
+        }
+        let Ok(lsn) = f[c_lsn].parse::<u64>() else {
+            continue;
+        };
+        let tx = u32::from_str_radix(f[c_tx].trim_start_matches("0x"), 16).unwrap_or(0);
+        oracle_txid_lsns.entry(tx).or_default().insert(lsn);
+        oracle_all_lsns.insert(lsn);
+    }
+    assert!(
+        oracle_txid_lsns.len() > 10,
+        "thin oracle: {} txids",
+        oracle_txid_lsns.len()
+    );
+    let oracle_min_lsn = *oracle_all_lsns.iter().min().expect("non-empty oracle");
+
+    // Reconstruct our transactions over the whole real stream.
+    let pages = read_record_pages(&data);
+    let mut all_records = Vec::new();
+    for page in &pages {
+        all_records.extend(parse_log_records(page));
+    }
+    let txns = reconstruct_transactions(&all_records);
+    // Every record lands in exactly one transaction — no record dropped by the
+    // grouping layer (the property the synthetic unit tests assert, re-checked on
+    // the real stream where it actually matters).
+    let grouped: usize = txns.iter().map(|t| t.records.len()).sum();
+    assert_eq!(
+        grouped,
+        all_records.len(),
+        "grouping dropped records on the real stream"
+    );
+
+    // For each txid we reconstruct, compare the in-window LSN set to the oracle's.
+    let (mut txid_exact, mut txid_divergent) = (0usize, 0usize);
+    let (mut stale, mut oracle_extra, mut absent_txid) = (0usize, 0usize, 0usize);
+    let mut divergence_sample: Vec<String> = Vec::new();
+    for t in &txns {
+        // Our LSNs for this txid, restricted to the oracle's recovery window
+        // (drop prior-generation residue the oracle filters).
+        let mut ours: HashSet<u64> = HashSet::new();
+        for &lsn in &t.lsns {
+            if lsn < oracle_min_lsn {
+                stale += 1;
+            } else {
+                ours.insert(lsn);
+            }
+        }
+        if ours.is_empty() {
+            continue; // wholly stale (pre-window) transaction — nothing to compare
+        }
+        let Some(theirs) = oracle_txid_lsns.get(&t.transaction_id) else {
+            // The oracle never used this txid at all. Only a concern if some of
+            // our in-window LSNs are ones the oracle *does* know under another
+            // txid (a real grouping disagreement) vs LSNs it never saw.
+            let misplaced = ours.iter().filter(|l| oracle_all_lsns.contains(l)).count();
+            absent_txid += 1;
+            if misplaced > 0 && divergence_sample.len() < 12 {
+                divergence_sample.push(format!(
+                    "txid={:#x}: oracle has no such txid yet {misplaced} of our {} LSNs are known to it",
+                    t.transaction_id,
+                    ours.len()
+                ));
+            }
+            continue;
+        };
+        // Restrict the oracle's set to LSNs it shares the window with us on.
+        let theirs_in: HashSet<u64> = theirs
+            .iter()
+            .copied()
+            .filter(|l| *l >= oracle_min_lsn)
+            .collect();
+        let missing: Vec<u64> = theirs_in.difference(&ours).copied().collect();
+        let extra: Vec<u64> = ours.difference(&theirs_in).copied().collect();
+        // An "extra" LSN the oracle never saw anywhere is recovery, not a
+        // grouping error; an extra LSN the oracle placed under a *different* txid
+        // is a genuine membership divergence.
+        let extra_misplaced: Vec<u64> = extra
+            .iter()
+            .copied()
+            .filter(|l| oracle_all_lsns.contains(l))
+            .collect();
+        oracle_extra += extra.len() - extra_misplaced.len();
+        if missing.is_empty() && extra_misplaced.is_empty() {
+            txid_exact += 1;
+        } else {
+            txid_divergent += 1;
+            if divergence_sample.len() < 12 {
+                divergence_sample.push(format!(
+                    "txid={:#x}: oracle_missing_from_ours={} ours_under_wrong_txid={}",
+                    t.transaction_id,
+                    missing.len(),
+                    extra_misplaced.len()
+                ));
+            }
+        }
+    }
+
+    let total = txid_exact + txid_divergent;
+    eprintln!(
+        "txid membership: exact={txid_exact} divergent={txid_divergent} \
+         (of {total} compared) | absent_txid={absent_txid} stale_records={stale} \
+         oracle_unseen_extra={oracle_extra}"
+    );
+    if !divergence_sample.is_empty() {
+        eprintln!("divergence sample: {divergence_sample:?}");
+    }
+
+    assert!(total > 10, "too few comparable transactions: {total}");
+    // The load-bearing claim: the per-txid LSN membership agrees for the
+    // overwhelming majority. Any residual divergence is characterized above
+    // (circular-buffer wrap / boundary records the two tools window differently)
+    // and reported, not silently tolerated.
+    let agreement = txid_exact as f64 / total as f64;
+    assert!(
+        agreement > 0.98,
+        "per-txid LSN-membership agreement {agreement:.4} below 0.98; sample={divergence_sample:?}"
+    );
 }
