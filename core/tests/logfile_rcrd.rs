@@ -440,31 +440,34 @@ fn semantic_classification_is_complete_and_sane() {
     }
 }
 
-/// Per-transaction LSN-membership differential against `LogFileParser`: for every
-/// transaction id `reconstruct_transactions` builds from the real DC01 `$LogFile`,
-/// the SET of record LSNs it assigns to that txid must match the SET
-/// `LogFileParser`'s `LogFile.csv` assigns to the same `lf_transaction_id`.
+/// Two-level transaction-reconstruction differential on the real DC01 `$LogFile`.
 ///
-/// **Join on LSN, group on txid.** The record's LSN is its globally-unique
-/// identity (see `full_logfile_records_match_logfileparser`), so comparing the
-/// *set of LSNs* per transaction is immune to `LogFileParser`'s table-dump
-/// `lf_Offset` shift — we never compare byte offsets here, only which LSNs each
-/// tool places in each transaction. Records the two tools see differently in the
-/// circular-buffer wrap are isolated rather than failing the run:
+/// `transaction_id` is the reused open-transaction-table **slot**, not a unique
+/// id — on DC01 only ~8 distinct values span ~78k records. `reconstruct_transactions`
+/// therefore works in two levels, validated at two different tiers:
 ///
-/// - **stale** — a record we recover whose LSN is below the oracle's oldest
-///   tracked LSN: prior-generation residue `LogFileParser` filters and we carve
-///   (documented in `validation.md`). Excluded from the per-txid comparison.
-/// - **`oracle_extra`** — an LSN the oracle lists for a txid that is absent from
-///   our stream entirely (a record in a page region our reader did not surface).
+/// **Level 1 — slot membership (Tier 1 vs `LogFileParser`).** Grouping our records
+/// by `transaction_id` (the slot) must reproduce `LogFileParser`'s own
+/// `lf_transaction_id` column: for each slot, the SET of record LSNs we assign
+/// must match the oracle's set. The comparison joins on LSN (each LSN is the
+/// record's globally-unique identity, see `full_logfile_records_match_logfileparser`),
+/// so it is immune to the table-dump `lf_Offset` shift — only which LSNs land in
+/// which slot is compared, never byte offsets. Prior-generation residue (LSN below
+/// the oracle's oldest tracked LSN) is isolated as `stale`, and LSNs the oracle
+/// never saw anywhere are isolated as recovery, exactly as the record differential
+/// does. This is the independent check: `LogFileParser` assigned these slots.
 ///
-/// The load-bearing assertion is that for the overwhelming majority of
-/// transaction ids the in-window LSN membership agrees exactly.
-///
-/// Tier 1 *input* (the record decode + LSN identity are validated against
-/// `LogFileParser` above); the transaction grouping reconciled here is checked
-/// against `LogFileParser`'s own `lf_transaction_id` column — an independent
-/// tool's transaction assignment on the same real stream.
+/// **Level 2 — per-transaction split (Tier 2, structural).** `LogFileParser`
+/// exposes only the slot, so there is **no independent per-transaction oracle**.
+/// The terminal-bounded split is validated *structurally* against its own
+/// definition: every record lands in exactly one transaction (partition); each
+/// transaction's records are LSN-contiguous within their slot's LSN-ordered stream
+/// (no interleaving of two transactions in one slot); each transaction ends at a
+/// terminal redo (`CommitTransaction`/`ForgetTransaction`) or is the trailing
+/// `Incomplete` run of its slot; and the transactions of a slot concatenate back
+/// to exactly that slot's record set. These are derivable-from-construction
+/// properties — genuinely checked on real data, but the scenario is ours, hence
+/// Tier 2.
 ///
 /// ```bash
 /// NTFS_FORENSIC_LOGFILE=DC01_LogFile.bin \
@@ -474,6 +477,7 @@ fn semantic_classification_is_complete_and_sane() {
 #[test]
 #[ignore = "requires NTFS_FORENSIC_LOGFILE + NTFS_FORENSIC_LOGFILE_CSV"]
 fn transaction_membership_matches_logfileparser() {
+    use ntfs_core::{Transaction, TransactionState};
     use std::collections::{HashMap, HashSet};
 
     let Ok(lf_path) = std::env::var("NTFS_FORENSIC_LOGFILE") else {
@@ -485,10 +489,8 @@ fn transaction_membership_matches_logfileparser() {
     let data = std::fs::read(&lf_path).expect("read $LogFile");
     let csv = std::fs::read_to_string(&csv_path).expect("read LogFile.csv");
 
-    // Index the oracle CSV (pipe-delimited): for each lf_transaction_id, the set
-    // of lf_LSN values it lists. Also record every LSN the oracle knows, so we
-    // can tell "the oracle puts this LSN in a different txid" from "the oracle
-    // has never heard of this LSN".
+    // Index the oracle CSV (pipe-delimited): for each lf_transaction_id (slot), the
+    // set of lf_LSN values it lists, plus every LSN the oracle knows.
     let mut lines = csv.lines();
     let header: Vec<&str> = lines.next().expect("csv header").split('|').collect();
     let col = |n: &str| {
@@ -499,7 +501,7 @@ fn transaction_membership_matches_logfileparser() {
     };
     let (c_lsn, c_tx) = (col("lf_LSN"), col("lf_transaction_id"));
 
-    let mut oracle_txid_lsns: HashMap<u32, HashSet<u64>> = HashMap::new();
+    let mut oracle_slot_lsns: HashMap<u32, HashSet<u64>> = HashMap::new();
     let mut oracle_all_lsns: HashSet<u64> = HashSet::new();
     for line in lines {
         let f: Vec<&str> = line.split('|').collect();
@@ -510,116 +512,191 @@ fn transaction_membership_matches_logfileparser() {
             continue;
         };
         let tx = u32::from_str_radix(f[c_tx].trim_start_matches("0x"), 16).unwrap_or(0);
-        oracle_txid_lsns.entry(tx).or_default().insert(lsn);
+        oracle_slot_lsns.entry(tx).or_default().insert(lsn);
         oracle_all_lsns.insert(lsn);
     }
+    let oracle_slot_count = oracle_slot_lsns.len();
     assert!(
-        oracle_txid_lsns.len() > 10,
-        "thin oracle: {} txids",
-        oracle_txid_lsns.len()
+        oracle_slot_count >= 2,
+        "thin oracle: {oracle_slot_count} slots"
     );
     let oracle_min_lsn = *oracle_all_lsns.iter().min().expect("non-empty oracle");
 
-    // Reconstruct our transactions over the whole real stream.
+    // Reconstruct transactions over the whole real stream.
     let pages = read_record_pages(&data);
     let mut all_records = Vec::new();
     for page in &pages {
         all_records.extend(parse_log_records(page));
     }
     let txns = reconstruct_transactions(&all_records);
-    // Every record lands in exactly one transaction — no record dropped by the
-    // grouping layer (the property the synthetic unit tests assert, re-checked on
-    // the real stream where it actually matters).
-    let grouped: usize = txns.iter().map(|t| t.records.len()).sum();
+
+    // ── Level 2 first (structural, no oracle): partition + contiguity + terminal.
+
+    // Partition: every record index appears in exactly one transaction.
+    let mut seen: Vec<usize> = txns
+        .iter()
+        .flat_map(|t| t.records.iter().copied())
+        .collect();
+    let n_grouped = seen.len();
+    seen.sort_unstable();
+    seen.dedup();
     assert_eq!(
-        grouped,
+        n_grouped,
         all_records.len(),
-        "grouping dropped records on the real stream"
+        "transactions must partition the records (count)"
+    );
+    assert_eq!(
+        seen.len(),
+        all_records.len(),
+        "transactions must partition the records (no index twice)"
     );
 
-    // For each txid we reconstruct, compare the in-window LSN set to the oracle's.
-    let (mut txid_exact, mut txid_divergent) = (0usize, 0usize);
-    let (mut stale, mut oracle_extra, mut absent_txid) = (0usize, 0usize, 0usize);
-    let mut divergence_sample: Vec<String> = Vec::new();
+    // Group our transactions back by slot to check contiguity + concatenation.
+    let mut ours_by_slot: HashMap<u32, Vec<&Transaction>> = HashMap::new();
     for t in &txns {
-        // Our LSNs for this txid, restricted to the oracle's recovery window
-        // (drop prior-generation residue the oracle filters).
-        let mut ours: HashSet<u64> = HashSet::new();
+        ours_by_slot.entry(t.transaction_id).or_default().push(t);
+    }
+
+    let is_terminal = |op: LogOp| matches!(op, LogOp::CommitTransaction | LogOp::ForgetTransaction);
+    for (slot, ts) in &ours_by_slot {
+        // The slot's records in LSN order (independent recompute).
+        let mut slot_lsns: Vec<u64> = all_records
+            .iter()
+            .filter(|r| r.transaction_id == *slot)
+            .map(|r| r.this_lsn)
+            .collect();
+        slot_lsns.sort_unstable();
+        // Concatenating the slot's transactions in output order must reproduce the
+        // slot's LSN-ordered stream exactly (contiguous, non-interleaved, complete).
+        let mut concat: Vec<u64> = Vec::new();
+        for t in ts {
+            // Within a transaction, LSNs are non-decreasing. NOT strictly
+            // ascending: the circular buffer physically retains duplicate LSNs
+            // where a wrapped page and a current page both hold a record at the
+            // same LSN (on DC01, slot 0x68 carries 667 such duplicate-LSN records,
+            // slot 0x40 carries 23). Those are recoverable prior-generation
+            // residue, not a reconstruction error — the order must be monotonic,
+            // duplicates allowed.
+            assert!(
+                t.lsns.windows(2).all(|w| w[0] <= w[1]),
+                "slot {slot:#x}: transaction LSNs not non-decreasing"
+            );
+            concat.extend_from_slice(&t.lsns);
+        }
+        assert_eq!(
+            concat, slot_lsns,
+            "slot {slot:#x}: transactions are not a contiguous partition of the slot stream"
+        );
+        // Each transaction ends at a terminal redo unless it is the slot's trailing
+        // run; the trailing run (Incomplete/Aborted) carries no terminal.
+        for (i, t) in ts.iter().enumerate() {
+            let last_idx = *t.records.last().expect("non-empty transaction");
+            let last_redo = all_records[last_idx].redo_op;
+            let is_last_run = i + 1 == ts.len();
+            match t.state {
+                TransactionState::Committed => assert!(
+                    is_terminal(last_redo),
+                    "slot {slot:#x}: Committed transaction must end at a terminal, got {last_redo:?}"
+                ),
+                TransactionState::Aborted | TransactionState::Incomplete => assert!(
+                    is_last_run && !is_terminal(last_redo),
+                    "slot {slot:#x}: non-terminal-bounded transaction must be the trailing run"
+                ),
+            }
+        }
+    }
+
+    // ── Level 1 (Tier 1 vs LogFileParser): slot placement of each record.
+    //
+    // Build a reverse index of which slot the oracle assigns each LSN to, then
+    // check every record we recovered: the LSN we placed in slot S must be the
+    // slot the oracle placed it in. This is the grouping claim — *placement
+    // precision*, charged per-record on the records we actually have. It is
+    // directional on purpose: LogFileParser follows the restart/LSN chain and
+    // surfaces ~3.4k more in-window records than our page-walk reader recovers
+    // (the reader-recall gap already characterized by the record differential,
+    // where `unexplained == 0` proves we add nothing the oracle lacks). That gap
+    // is the reader's recall, NOT the transaction layer's correctness, so it is
+    // reported as `oracle_only_recall_gap` but not charged against placement.
+    let mut oracle_lsn_slot: HashMap<u64, u32> = HashMap::new();
+    for (slot, lsns) in &oracle_slot_lsns {
+        for &lsn in lsns {
+            oracle_lsn_slot.insert(lsn, *slot);
+        }
+    }
+
+    let (mut placed_ok, mut misplaced, mut stale, mut ours_only_recovery) = (0, 0, 0, 0usize);
+    let mut misplaced_sample: Vec<String> = Vec::new();
+    for t in &txns {
         for &lsn in &t.lsns {
             if lsn < oracle_min_lsn {
-                stale += 1;
-            } else {
-                ours.insert(lsn);
+                stale += 1; // prior-generation residue the oracle filters
+                continue;
             }
-        }
-        if ours.is_empty() {
-            continue; // wholly stale (pre-window) transaction — nothing to compare
-        }
-        let Some(theirs) = oracle_txid_lsns.get(&t.transaction_id) else {
-            // The oracle never used this txid at all. Only a concern if some of
-            // our in-window LSNs are ones the oracle *does* know under another
-            // txid (a real grouping disagreement) vs LSNs it never saw.
-            let misplaced = ours.iter().filter(|l| oracle_all_lsns.contains(l)).count();
-            absent_txid += 1;
-            if misplaced > 0 && divergence_sample.len() < 12 {
-                divergence_sample.push(format!(
-                    "txid={:#x}: oracle has no such txid yet {misplaced} of our {} LSNs are known to it",
-                    t.transaction_id,
-                    ours.len()
-                ));
-            }
-            continue;
-        };
-        // Restrict the oracle's set to LSNs it shares the window with us on.
-        let theirs_in: HashSet<u64> = theirs
-            .iter()
-            .copied()
-            .filter(|l| *l >= oracle_min_lsn)
-            .collect();
-        let missing: Vec<u64> = theirs_in.difference(&ours).copied().collect();
-        let extra: Vec<u64> = ours.difference(&theirs_in).copied().collect();
-        // An "extra" LSN the oracle never saw anywhere is recovery, not a
-        // grouping error; an extra LSN the oracle placed under a *different* txid
-        // is a genuine membership divergence.
-        let extra_misplaced: Vec<u64> = extra
-            .iter()
-            .copied()
-            .filter(|l| oracle_all_lsns.contains(l))
-            .collect();
-        oracle_extra += extra.len() - extra_misplaced.len();
-        if missing.is_empty() && extra_misplaced.is_empty() {
-            txid_exact += 1;
-        } else {
-            txid_divergent += 1;
-            if divergence_sample.len() < 12 {
-                divergence_sample.push(format!(
-                    "txid={:#x}: oracle_missing_from_ours={} ours_under_wrong_txid={}",
-                    t.transaction_id,
-                    missing.len(),
-                    extra_misplaced.len()
-                ));
+            match oracle_lsn_slot.get(&lsn) {
+                Some(&oracle_slot) if oracle_slot == t.transaction_id => placed_ok += 1,
+                Some(&oracle_slot) => {
+                    misplaced += 1;
+                    if misplaced_sample.len() < 12 {
+                        misplaced_sample.push(format!(
+                            "lsn={lsn}: ours slot {:#x}, oracle slot {oracle_slot:#x}",
+                            t.transaction_id
+                        ));
+                    }
+                }
+                None => ours_only_recovery += 1, // an LSN the oracle never saw
             }
         }
     }
+    // The oracle's in-window records we did not recover (the recall gap).
+    let ours_in_window: HashSet<u64> = all_records
+        .iter()
+        .map(|r| r.this_lsn)
+        .filter(|l| *l >= oracle_min_lsn)
+        .collect();
+    let oracle_only_recall_gap = oracle_all_lsns
+        .iter()
+        .filter(|l| **l >= oracle_min_lsn && !ours_in_window.contains(l))
+        .count();
 
-    let total = txid_exact + txid_divergent;
+    let committed = txns
+        .iter()
+        .filter(|t| t.state == TransactionState::Committed)
+        .count();
+    let aborted = txns
+        .iter()
+        .filter(|t| t.state == TransactionState::Aborted)
+        .count();
+    let incomplete = txns
+        .iter()
+        .filter(|t| t.state == TransactionState::Incomplete)
+        .count();
     eprintln!(
-        "txid membership: exact={txid_exact} divergent={txid_divergent} \
-         (of {total} compared) | absent_txid={absent_txid} stale_records={stale} \
-         oracle_unseen_extra={oracle_extra}"
+        "slots: oracle={oracle_slot_count} ours={} | placement: placed_ok={placed_ok} \
+         misplaced={misplaced} stale_records={stale} ours_only_recovery={ours_only_recovery} \
+         oracle_only_recall_gap={oracle_only_recall_gap}",
+        ours_by_slot.len()
     );
-    if !divergence_sample.is_empty() {
-        eprintln!("divergence sample: {divergence_sample:?}");
+    eprintln!(
+        "transactions reconstructed: {} (committed={committed} aborted={aborted} incomplete={incomplete})",
+        txns.len()
+    );
+    if !misplaced_sample.is_empty() {
+        eprintln!("misplaced sample: {misplaced_sample:?}");
     }
 
-    assert!(total > 10, "too few comparable transactions: {total}");
-    // The load-bearing claim: the per-txid LSN membership agrees for the
-    // overwhelming majority. Any residual divergence is characterized above
-    // (circular-buffer wrap / boundary records the two tools window differently)
-    // and reported, not silently tolerated.
-    let agreement = txid_exact as f64 / total as f64;
+    // Load-bearing Level-1 claim: of every record we recovered that the oracle
+    // also knows, the slot we assigned is the slot LogFileParser assigned — zero
+    // misplacements. (Placement precision; the reader's recall gap is reported,
+    // not charged.) The slot count must also match the oracle's.
     assert!(
-        agreement > 0.98,
-        "per-txid LSN-membership agreement {agreement:.4} below 0.98; sample={divergence_sample:?}"
+        ours_by_slot.len() == oracle_slot_count,
+        "slot count {} != oracle {oracle_slot_count}",
+        ours_by_slot.len()
+    );
+    assert!(placed_ok > 50_000, "too few placed records: {placed_ok}");
+    assert_eq!(
+        misplaced, 0,
+        "records placed in a different slot than LogFileParser: {misplaced_sample:?}"
     );
 }
