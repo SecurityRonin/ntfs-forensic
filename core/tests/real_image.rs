@@ -28,7 +28,7 @@
 use ntfs_core::BootSector;
 
 /// The real boot sector carved from the DEF CON 2018 CTF image.
-const REAL_BOOT: &[u8] = include_bytes!("data/defcon2018_cdrive_boot.bin");
+const REAL_BOOT: &[u8] = include_bytes!("../../tests/data/defcon2018_cdrive_boot.bin");
 
 #[test]
 fn parses_real_ntfs_boot_sector_matching_tsk() {
