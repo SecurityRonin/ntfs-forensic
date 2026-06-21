@@ -162,7 +162,22 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
     pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
-        self.read_data_stream(path, None)
+        self.read_data_stream(path, None, u64::MAX)
+    }
+
+    /// Read at most `max_bytes` of a file's unnamed (default) `$DATA` by path.
+    ///
+    /// The cap is enforced **during** the read: the runlist is walked only until
+    /// `max_bytes` bytes are materialized, so a crafted/huge `$DATA` cannot be
+    /// pulled wholesale into memory before a caller truncates it. The result is a
+    /// true prefix of [`read_file`](Self::read_file) — the first
+    /// `min(file size, max_bytes)` bytes.
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
+    pub fn read_file_capped(&mut self, path: &str, max_bytes: usize) -> Result<Vec<u8>> {
+        self.read_data_stream(path, None, max_bytes as u64)
     }
 
     /// Read a named `$DATA` stream — an alternate data stream (ADS) — by path
@@ -172,12 +187,17 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotFound`] if the path or the named stream is missing.
     pub fn read_named_stream(&mut self, path: &str, stream: &str) -> Result<Vec<u8>> {
-        self.read_data_stream(path, Some(stream))
+        self.read_data_stream(path, Some(stream), u64::MAX)
     }
 
     /// Read the `$DATA` attribute named `stream` (or the unnamed/default stream
-    /// when `None`) of the file at `path`.
-    fn read_data_stream(&mut self, path: &str, stream: Option<&str>) -> Result<Vec<u8>> {
+    /// when `None`) of the file at `path`, materializing at most `max_bytes`.
+    fn read_data_stream(
+        &mut self,
+        path: &str,
+        stream: Option<&str>,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
         let rec_num = self.resolve_path(path)?;
         let record = self.read_record(rec_num)?;
         // Gather the base record and any extension records the file's attributes
@@ -209,7 +229,12 @@ impl<R: Read + Seek> NtfsFs<R> {
         }
 
         if let Some((idx, attr)) = resident {
-            return read_attribute_value(&mut self.reader, &records[idx], &attr, cluster_size);
+            let mut value =
+                read_attribute_value(&mut self.reader, &records[idx], &attr, cluster_size)?;
+            if (value.len() as u64) > max_bytes {
+                value.truncate(max_bytes as usize); // max_bytes < len ⇒ fits usize
+            }
+            return Ok(value);
         }
         if fragments.is_empty() {
             return Err(match stream {
@@ -229,12 +254,13 @@ impl<R: Read + Seek> NtfsFs<R> {
         // The compression flag + unit live on the `$DATA` attribute (identical
         // across fragments); dispatch through the shared non-resident reader so a
         // compressed file is LZNT1-decompressed, not returned as raw bytes.
-        crate::data::read_nonresident(
+        crate::data::read_nonresident_capped(
             &mut self.reader,
             &runs,
             cluster_size,
             real_size,
             &fragments[0].3,
+            max_bytes,
         )
     }
 

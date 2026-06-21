@@ -32,6 +32,25 @@ pub fn read_runs<R: Read + Seek>(
     cluster_size: u64,
     real_size: u64,
 ) -> Result<Vec<u8>> {
+    read_runs_capped(reader, runs, cluster_size, real_size, u64::MAX)
+}
+
+/// Like [`read_runs`], but materialize at most `max_bytes` — the cap is applied
+/// **during** the walk, so a crafted/huge runlist can never balloon a `Vec`
+/// before a caller truncates it. The result is the first
+/// `min(real_size, bytes the runs allocate, max_bytes)` bytes of the stream — a
+/// true prefix, with the final partial cluster sliced to the cap.
+///
+/// # Errors
+///
+/// As [`read_runs`].
+pub fn read_runs_capped<R: Read + Seek>(
+    reader: &mut R,
+    runs: &[Run],
+    cluster_size: u64,
+    real_size: u64,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
     // Bytes the runs allocate (checked); the value can't exceed this.
     let mut allocated = 0u64;
     for r in runs {
@@ -44,7 +63,7 @@ pub fn read_runs<R: Read + Seek>(
             .ok_or(NtfsError::BadRunlist("allocation overflow"))?;
     }
 
-    let want = real_size.min(allocated);
+    let want = real_size.min(allocated).min(max_bytes);
     if want > MAX_VALUE_BYTES {
         return Err(NtfsError::TooLarge { bytes: want });
     }
@@ -132,6 +151,24 @@ pub(crate) fn read_nonresident<R: Read + Seek>(
     real_size: u64,
     attribute: &Attribute,
 ) -> Result<Vec<u8>> {
+    read_nonresident_capped(reader, runs, cluster_size, real_size, attribute, u64::MAX)
+}
+
+/// Like [`read_nonresident`], but materialize at most `max_bytes` — the cap is
+/// honored on both the raw-runlist and the LZNT1-decompressed path, so neither
+/// can balloon memory past the cap before a caller truncates.
+///
+/// # Errors
+///
+/// As [`read_nonresident`].
+pub(crate) fn read_nonresident_capped<R: Read + Seek>(
+    reader: &mut R,
+    runs: &[Run],
+    cluster_size: u64,
+    real_size: u64,
+    attribute: &Attribute,
+    max_bytes: u64,
+) -> Result<Vec<u8>> {
     let cu = attribute.compression_unit();
     if attribute.is_compressed() && cu != 0 {
         let unit_clusters = 1u64
@@ -140,34 +177,47 @@ pub(crate) fn read_nonresident<R: Read + Seek>(
                 offset: attribute.offset,
                 detail: "implausible compression unit",
             })?;
-        read_compressed_runs(reader, runs, cluster_size, real_size, unit_clusters)
+        read_compressed_runs_capped(
+            reader,
+            runs,
+            cluster_size,
+            real_size,
+            unit_clusters,
+            max_bytes,
+        )
     } else {
-        read_runs(reader, runs, cluster_size, real_size)
+        read_runs_capped(reader, runs, cluster_size, real_size, max_bytes)
     }
 }
 
-/// Read a COMPRESSED non-resident attribute, LZNT1-decompressing each
-/// compression unit. NTFS stores a compressed file in `unit_clusters`-cluster
-/// units; within a unit the data is either: fully allocated (stored
-/// uncompressed → copied verbatim), partially allocated then sparse-padded (the
-/// allocated clusters hold the LZNT1 stream → decompressed), or fully sparse (a
-/// unit of zeroes). The result is truncated to `real_size`.
+/// Read a COMPRESSED non-resident attribute, LZNT1-decompressing only enough
+/// units to satisfy `max_bytes` — the walk stops once the cap is reached, so a
+/// crafted huge `real_size` can't force the whole stream to be decompressed into
+/// memory. NTFS stores a compressed file in `unit_clusters`-cluster units; within
+/// a unit the data is either: fully allocated (stored uncompressed → copied
+/// verbatim), partially allocated then sparse-padded (the allocated clusters hold
+/// the LZNT1 stream → decompressed), or fully sparse (a unit of zeroes). The
+/// result is truncated to `min(real_size, max_bytes)`.
 ///
 /// # Errors
 ///
 /// [`NtfsError::TooLarge`] for an implausible size, [`NtfsError::BadRunlist`] on
 /// arithmetic overflow, [`NtfsError::BadCompression`] on a malformed LZNT1
 /// stream, or [`NtfsError::Io`] on read failure.
-fn read_compressed_runs<R: Read + Seek>(
+fn read_compressed_runs_capped<R: Read + Seek>(
     reader: &mut R,
     runs: &[Run],
     cluster_size: u64,
     real_size: u64,
     unit_clusters: u64,
+    max_bytes: u64,
 ) -> Result<Vec<u8>> {
     if real_size > MAX_VALUE_BYTES {
         return Err(NtfsError::TooLarge { bytes: real_size });
     }
+    // The byte target is the declared size clamped by the cap — every loop bound
+    // and tail computation below works against this, never the raw real_size.
+    let target = real_size.min(max_bytes);
     let unit_bytes = unit_clusters
         .checked_mul(cluster_size)
         .ok_or(NtfsError::BadRunlist("compression unit byte size overflow"))?;
@@ -175,11 +225,11 @@ fn read_compressed_runs<R: Read + Seek>(
     // Run cursor: (lcn, remaining_clusters), mutated as clusters are consumed.
     let mut queue: std::collections::VecDeque<(Option<u64>, u64)> =
         runs.iter().map(|r| (r.lcn, r.length)).collect();
-    let real_size_usize =
-        usize::try_from(real_size).map_err(|_| NtfsError::TooLarge { bytes: real_size })?;
+    let target_usize =
+        usize::try_from(target).map_err(|_| NtfsError::TooLarge { bytes: target })?;
     let mut out: Vec<u8> = Vec::new();
 
-    while (out.len() as u64) < real_size {
+    while (out.len() as u64) < target {
         // Gather exactly one compression unit (`unit_clusters` of VCN) from the
         // runlist; the leading allocated clusters (if any) hold the unit's bytes.
         let mut real_bytes: Vec<u8> = Vec::new();
@@ -218,7 +268,7 @@ fn read_compressed_runs<R: Read + Seek>(
 
         if real_clusters == 0 {
             // Fully sparse unit → a unit of zeroes (bounded by the file tail).
-            let want = unit_bytes.min(real_size - out.len() as u64);
+            let want = unit_bytes.min(target - out.len() as u64);
             let want = usize::try_from(want).map_err(|_| NtfsError::TooLarge { bytes: want })?;
             out.resize(out.len() + want, 0);
         } else if real_clusters == unit_clusters {
@@ -237,7 +287,7 @@ fn read_compressed_runs<R: Read + Seek>(
         }
     }
 
-    out.truncate(real_size_usize);
+    out.truncate(target_usize);
     Ok(out)
 }
 
@@ -498,7 +548,7 @@ mod tests {
             length: 16,
             lcn: None,
         }];
-        let out = read_compressed_runs(&mut vol, &runs, 512, 100, 16).unwrap();
+        let out = read_compressed_runs_capped(&mut vol, &runs, 512, 100, 16, u64::MAX).unwrap();
         assert_eq!(out, vec![0u8; 100]);
     }
 
@@ -511,7 +561,8 @@ mod tests {
             length: 16,
             lcn: Some(0),
         }];
-        let out = read_compressed_runs(&mut vol, &runs, 512, 16 * 512, 16).unwrap();
+        let out =
+            read_compressed_runs_capped(&mut vol, &runs, 512, 16 * 512, 16, u64::MAX).unwrap();
         assert_eq!(out.len(), 16 * 512);
         assert!(out.iter().all(|&b| b == 0x5A));
     }
@@ -526,7 +577,8 @@ mod tests {
             length: 16,
             lcn: Some(0),
         }];
-        let out = read_compressed_runs(&mut vol, &runs, 512, 2 * 16 * 512, 16).unwrap();
+        let out =
+            read_compressed_runs_capped(&mut vol, &runs, 512, 2 * 16 * 512, 16, u64::MAX).unwrap();
         assert_eq!(out.len(), 16 * 512, "only the available unit is returned");
     }
 
@@ -537,8 +589,33 @@ mod tests {
             length: 1,
             lcn: Some(0),
         }];
-        let err = read_compressed_runs(&mut vol, &runs, 512, MAX_VALUE_BYTES + 1, 16);
+        let err =
+            read_compressed_runs_capped(&mut vol, &runs, 512, MAX_VALUE_BYTES + 1, 16, u64::MAX);
         assert!(matches!(err, Err(NtfsError::TooLarge { .. })));
+    }
+
+    #[test]
+    fn compressed_runs_capped_below_real_size_is_a_true_prefix() {
+        // A fully-allocated 16-cluster unit (8192 bytes of 0x5A); a cap below the
+        // real size must bound the result to a true prefix.
+        let runs = [Run {
+            length: 16,
+            lcn: Some(0),
+        }];
+        let mut full_vol = std::io::Cursor::new(vec![0x5Au8; 16 * 512]);
+        let full =
+            read_compressed_runs_capped(&mut full_vol, &runs, 512, 16 * 512, 16, u64::MAX).unwrap();
+
+        let cap = 700u64;
+        let mut vol = std::io::Cursor::new(vec![0x5Au8; 16 * 512]);
+        let out = read_compressed_runs_capped(&mut vol, &runs, 512, 16 * 512, 16, cap).unwrap();
+        assert!(out.len() as u64 <= cap);
+        assert_eq!(out.len(), cap as usize);
+        assert_eq!(
+            out[..],
+            full[..cap as usize],
+            "capped bytes are a true prefix"
+        );
     }
 
     #[test]
