@@ -28,7 +28,7 @@
 //!   single transaction"; `ClientPreviousLsn`/`ClientUndoNextLsn` form the
 //!   redo/undo replay chain.
 //!   <https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html>
-//! - **TZWorks `mala` users guide** — "each record has a pointer to the previous
+//! - **`TZWorks` `mala` users guide** — "each record has a pointer to the previous
 //!   record in the chain for its transaction … consecutive records can be
 //!   interleaved between multiple transactions"; the tool "groups the
 //!   appropriate operations into their own separate transactions".
@@ -118,8 +118,64 @@ pub struct Transaction {
 /// records whose opcode is [`LogOp::Unknown`].
 #[must_use]
 pub fn reconstruct_transactions(records: &[LogRecord]) -> Vec<Transaction> {
-    let _ = records;
-    Vec::new()
+    use std::collections::HashMap;
+
+    // Group record indices by transaction_id. A Vec per txid preserves the
+    // source order; we sort each group by LSN below.
+    let mut groups: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (idx, rec) in records.iter().enumerate() {
+        groups.entry(rec.transaction_id).or_default().push(idx);
+    }
+
+    let mut txns: Vec<Transaction> = Vec::with_capacity(groups.len());
+    for (transaction_id, mut indices) in groups {
+        // Replay order is ascending LSN within the transaction.
+        indices.sort_by_key(|&i| records[i].this_lsn);
+
+        let mut lsns = Vec::with_capacity(indices.len());
+        let mut operations = Vec::with_capacity(indices.len());
+        // Final state is decided by the terminal control opcode present: a
+        // commit/forget seals (Committed) and overrides a compensation; a
+        // compensation alone aborts; neither is Incomplete. EndTopLevelAction
+        // and PrepareTransaction are sub-action markers, not terminal.
+        let mut committed = false;
+        let mut compensated = false;
+        for &i in &indices {
+            let rec = &records[i];
+            lsns.push(rec.this_lsn);
+            operations.push(super::classify(rec.redo_op, rec.undo_op));
+            // A control opcode can appear on either the redo or the undo side.
+            for op in [rec.redo_op, rec.undo_op] {
+                match op {
+                    LogOp::CommitTransaction | LogOp::ForgetTransaction => committed = true,
+                    LogOp::CompensationLogRecord => compensated = true,
+                    _ => {}
+                }
+            }
+        }
+
+        let state = if committed {
+            TransactionState::Committed
+        } else if compensated {
+            TransactionState::Aborted
+        } else {
+            TransactionState::Incomplete
+        };
+
+        txns.push(Transaction {
+            transaction_id,
+            records: indices,
+            lsns,
+            operations,
+            state,
+        });
+    }
+
+    // Output in log order: by the lowest LSN each transaction owns. Every group
+    // has at least one record (it was created from a record), so `first` is
+    // always present.
+    txns.sort_by_key(|t| t.lsns.first().copied().unwrap_or(u64::MAX));
+    txns
 }
 
 #[cfg(test)]
