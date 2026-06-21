@@ -120,13 +120,6 @@ impl FileOperation {
 /// without constructing a full [`LogRecord`].
 #[must_use]
 pub fn classify(redo: LogOp, undo: LogOp) -> FileOperation {
-    let _ = (redo, undo);
-    unimplemented!("RED: semantic (redo,undo) -> FileOperation mapping not yet written")
-}
-
-#[cfg(any())]
-#[must_use]
-fn classify_impl(redo: LogOp, undo: LogOp) -> FileOperation {
     use FileOperation as F;
     use LogOp as O;
 
@@ -197,8 +190,8 @@ mod tests {
     // NTFSOperations); jschicht LogFileParser _SanityTest1 (valid redo/undo pairs);
     // Carrier, File System Forensic Analysis ch. 13 (Init/Dealloc ⇒ create/delete).
 
-    /// Carrier ch.13: `InitializeFileRecordSegment` allocates and initializes a
-    /// new FRS ⇒ file creation. dfir_ntfs lists it in LOGGED_RESIDENT_UPDATES.
+    // Carrier ch.13: InitializeFileRecordSegment allocates and initializes a
+    // new FRS => file creation. dfir_ntfs lists it in LOGGED_RESIDENT_UPDATES.
     #[test]
     fn initialize_file_record_segment_is_create() {
         assert_eq!(
@@ -207,7 +200,7 @@ mod tests {
         );
     }
 
-    /// Carrier ch.13: `DeallocateFileRecordSegment` frees an FRS ⇒ file deletion.
+    // Carrier ch.13: DeallocateFileRecordSegment frees an FRS => file deletion.
     #[test]
     fn deallocate_file_record_segment_is_delete() {
         assert_eq!(
@@ -216,8 +209,8 @@ mod tests {
         );
     }
 
-    /// LogFileParser `_SanityTest1`: a pure deallocation is logged as
-    /// `Redo = Noop`, `Undo = DeallocateFileRecordSegment` — classified by undo.
+    // LogFileParser _SanityTest1: a pure deallocation is logged as
+    // Redo=Noop, Undo=DeallocateFileRecordSegment -- classified by undo.
     #[test]
     fn noop_redo_dealloc_undo_is_delete() {
         assert_eq!(
@@ -226,9 +219,34 @@ mod tests {
         );
     }
 
-    /// LogFileParser `_SanityTest1` (#13/#14): UpdateFileName{Root,Allocation}
-    /// are self-paired and update the `$FILE_NAME` held in a directory index ⇒
-    /// rename / move.
+    // A Noop redo with a DeleteIndexEntry{Root,Allocation} undo is the
+    // inverse-side of an index removal (the redo already happened in a prior
+    // record); classify by the undo so the index delete is not lost as a Noop.
+    #[test]
+    fn noop_redo_delete_index_undo_is_index_delete() {
+        assert_eq!(
+            classify(LogOp::Noop, LogOp::DeleteIndexEntryRoot),
+            FileOperation::IndexDelete
+        );
+        assert_eq!(
+            classify(LogOp::Noop, LogOp::DeleteIndexEntryAllocation),
+            FileOperation::IndexDelete
+        );
+    }
+
+    // A Noop redo with a DeleteAttribute undo is the inverse-side of an
+    // attribute removal; classify by the undo.
+    #[test]
+    fn noop_redo_delete_attribute_undo_is_attribute_delete() {
+        assert_eq!(
+            classify(LogOp::Noop, LogOp::DeleteAttribute),
+            FileOperation::AttributeDelete
+        );
+    }
+
+    // LogFileParser _SanityTest1 (#13/#14): UpdateFileName{Root,Allocation}
+    // are self-paired and update the $FILE_NAME held in a directory index =>
+    // rename / move.
     #[test]
     fn update_file_name_is_rename() {
         assert_eq!(
@@ -244,9 +262,9 @@ mod tests {
         );
     }
 
-    /// LogFileParser `_SanityTest1` (#4/#5): AddIndexEntry{Root,Allocation} pair
-    /// with the corresponding Delete; the redo inserts a name into a directory
-    /// index.
+    // LogFileParser _SanityTest1 (#4/#5): AddIndexEntry{Root,Allocation} pair
+    // with the corresponding Delete; the redo inserts a name into a directory
+    // index.
     #[test]
     fn add_index_entry_is_index_insert() {
         assert_eq!(
@@ -262,8 +280,8 @@ mod tests {
         );
     }
 
-    /// LogFileParser `_SanityTest1` (#4/#5): DeleteIndexEntry{Root,Allocation}
-    /// remove a name from a directory index.
+    // LogFileParser _SanityTest1 (#4/#5): DeleteIndexEntry{Root,Allocation}
+    // remove a name from a directory index.
     #[test]
     fn delete_index_entry_is_index_delete() {
         assert_eq!(
@@ -279,7 +297,7 @@ mod tests {
         );
     }
 
-    /// LogFileParser `_SanityTest1` (#6): CreateAttribute ↔ DeleteAttribute.
+    // LogFileParser _SanityTest1 (#6): CreateAttribute <-> DeleteAttribute.
     #[test]
     fn create_and_delete_attribute() {
         assert_eq!(
@@ -292,8 +310,8 @@ mod tests {
         );
     }
 
-    /// dfir_ntfs `_Decode_SetNewAttributeSize`: SetNewAttributeSizes carries the
-    /// new alloc/real/initialized sizes ⇒ a resize.
+    // dfir_ntfs _Decode_SetNewAttributeSize: SetNewAttributeSizes carries the
+    // new alloc/real/initialized sizes => a resize.
     #[test]
     fn set_new_attribute_sizes_is_resize() {
         assert_eq!(
@@ -302,9 +320,9 @@ mod tests {
         );
     }
 
-    /// dfir_ntfs LOGGED_RESIDENT_UPDATES / LOGGED_NONRESIDENT_UPDATES: these
-    /// opcodes write attribute data (resident $MFT bytes or nonresident clusters)
-    /// or index-buffer content ⇒ data write.
+    // dfir_ntfs LOGGED_RESIDENT_UPDATES / LOGGED_NONRESIDENT_UPDATES: these
+    // opcodes write attribute data (resident $MFT bytes or nonresident clusters)
+    // or index-buffer content => data write.
     #[test]
     fn value_and_mapping_updates_are_data_write() {
         for redo in [
@@ -322,9 +340,9 @@ mod tests {
         }
     }
 
-    /// LogFileParser `_SanityTest1` (#7): SetBits ↔ ClearBits in the nonresident
-    /// bitmap; DeleteDirtyClusters marks clusters dirty. All are space
-    /// (de)allocation, not a file-content change.
+    // LogFileParser _SanityTest1 (#7): SetBits <-> ClearBits in the nonresident
+    // bitmap; DeleteDirtyClusters marks clusters dirty. All are space
+    // (de)allocation, not a file-content change.
     #[test]
     fn bitmap_and_dirty_clusters_are_bitmap_allocation() {
         assert_eq!(
@@ -347,9 +365,9 @@ mod tests {
         );
     }
 
-    /// flatcap NTFS recovery doc + LogFileParser: these mark transaction
-    /// boundaries (prepare/commit/forget/end-top-level) or an undo
-    /// (CompensationLogRecord), not an on-disk file mutation.
+    // flatcap NTFS recovery doc + LogFileParser: these mark transaction
+    // boundaries (prepare/commit/forget/end-top-level) or an undo
+    // (CompensationLogRecord), not an on-disk file mutation.
     #[test]
     fn transaction_boundaries_are_transaction_control() {
         for redo in [
@@ -367,8 +385,8 @@ mod tests {
         }
     }
 
-    /// dfir_ntfs NTFSOperations: the *Dump and HotFix opcodes are log
-    /// housekeeping (restart-area / table snapshots) recording no file change.
+    // dfir_ntfs NTFSOperations: the *Dump and HotFix opcodes are log
+    // housekeeping (restart-area / table snapshots) recording no file change.
     #[test]
     fn dumps_and_hotfix_are_table_dump() {
         for redo in [
@@ -387,14 +405,14 @@ mod tests {
         }
     }
 
-    /// A `Noop`/`Noop` record is a genuine no-op.
+    // A Noop/Noop record is a genuine no-op.
     #[test]
     fn noop_pair_is_noop() {
         assert_eq!(classify(LogOp::Noop, LogOp::Noop), FileOperation::Noop);
     }
 
-    /// Show-the-unrecognized-value: an undocumented redo opcode surfaces both raw
-    /// codes verbatim, never silently dropped.
+    // Show-the-unrecognized-value: an undocumented redo opcode surfaces both raw
+    // codes verbatim, never silently dropped.
     #[test]
     fn unknown_redo_surfaces_both_raw_codes() {
         assert_eq!(
@@ -403,7 +421,7 @@ mod tests {
         );
     }
 
-    /// A `Noop` redo paired with an *undocumented* undo also surfaces both codes.
+    // A Noop redo paired with an undocumented undo also surfaces both codes.
     #[test]
     fn noop_redo_unknown_undo_surfaces_codes() {
         assert_eq!(
@@ -412,9 +430,9 @@ mod tests {
         );
     }
 
-    /// A `Noop` redo paired with a documented-but-unmapped undo (e.g. an
-    /// UpdateResidentValue undo with a Noop redo, which NTFS does not emit)
-    /// surfaces both real codes rather than misclassifying.
+    // A Noop redo paired with a documented-but-unmapped undo (e.g. an
+    // UpdateResidentValue undo with a Noop redo, which NTFS does not emit)
+    // surfaces both real codes rather than misclassifying.
     #[test]
     fn noop_redo_unmapped_known_undo_surfaces_codes() {
         assert_eq!(
@@ -423,7 +441,7 @@ mod tests {
         );
     }
 
-    /// The `FileOperation::classify` convenience wraps a full `LogRecord`.
+    // The FileOperation::classify convenience wraps a full LogRecord.
     #[test]
     fn classify_over_log_record() {
         let rec = LogRecord {
