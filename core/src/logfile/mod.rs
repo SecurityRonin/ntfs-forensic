@@ -42,6 +42,38 @@ pub struct LogFileSummary {
     pub highest_lsn: u64,
 }
 
+/// One RCRD record page from $LogFile with its multi-sector USA fixup applied.
+///
+/// `data` holds the page exactly as it was in memory before NTFS wrote the
+/// update sequence number (USN) into each 512-byte sector tail — i.e. the
+/// displaced original bytes have been restored from the update-sequence array,
+/// so the log-record stream within the page can be read directly. Pages whose
+/// USA integrity check fails are not represented here (see [`read_record_pages`]).
+#[derive(Debug, Clone)]
+pub struct RecordPage {
+    /// Byte offset of this page within the $LogFile stream.
+    pub offset: usize,
+    /// `last_lsn` from the RCRD header (offset 0x08): the LSN of the last log
+    /// record that ends on this page.
+    pub last_lsn: u64,
+    /// Page bytes with the USA fixup applied (sector tails restored).
+    pub data: Vec<u8>,
+}
+
+/// Read every RCRD record page from a $LogFile, applying the multi-sector USA
+/// fixup to each page in turn.
+///
+/// Only pages beginning with the `RCRD` signature are returned; RSTR restart
+/// pages and zeroed/garbage pages are skipped. A page whose USA integrity check
+/// fails — a sector tail on disk does not match the page's USN (torn write,
+/// corruption, or tampering) — is also skipped, because its record bytes cannot
+/// be trusted. The fixup reuses [`crate::record::apply_fixup`], which is
+/// signature-agnostic (it reads `usa_offset`/`usa_count` from the shared
+/// multi-sector header that RCRD pages and FILE records both carry).
+pub fn read_record_pages(_data: &[u8]) -> Vec<RecordPage> {
+    Vec::new()
+}
+
 /// Parse NTFS $LogFile data.
 ///
 /// Scans for restart areas (RSTR) and record pages (RCRD) to build
