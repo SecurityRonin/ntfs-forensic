@@ -131,14 +131,40 @@ pub fn reconstruct_transactions(records: &[LogRecord]) -> Vec<Transaction> {
     for (transaction_id, mut indices) in slots {
         // Replay order within the slot.
         indices.sort_by_key(|&i| records[i].this_lsn);
-        // RED placeholder: whole-slot grouping (the flawed model) — does not split
-        // at terminals, so the split tests fail until GREEN.
-        txns.push(build_transaction(
-            transaction_id,
-            indices,
-            records,
-            TransactionState::Committed,
-        ));
+
+        // Level 2 — split the slot stream into terminal-bounded runs. A run ends
+        // *after* a terminal redo; a compensation redo within a run marks it
+        // aborted (unless a later terminal in the same run seals it).
+        let mut run: Vec<usize> = Vec::new();
+        let mut compensated = false;
+        for &i in &indices {
+            run.push(i);
+            // Read terminal/abort on the REDO opcode only — a Forget's undo field
+            // is CompensationLogRecord by construction and must not abort it.
+            match records[i].redo_op {
+                LogOp::CommitTransaction | LogOp::ForgetTransaction => {
+                    txns.push(build_transaction(
+                        transaction_id,
+                        std::mem::take(&mut run),
+                        records,
+                        TransactionState::Committed,
+                    ));
+                    compensated = false;
+                }
+                LogOp::CompensationLogRecord => compensated = true,
+                _ => {}
+            }
+        }
+        // Trailing records with no terminal: aborted if a compensation appeared,
+        // otherwise incomplete (the sealing terminal was not recovered).
+        if !run.is_empty() {
+            let state = if compensated {
+                TransactionState::Aborted
+            } else {
+                TransactionState::Incomplete
+            };
+            txns.push(build_transaction(transaction_id, run, records, state));
+        }
     }
 
     // Log order: by the lowest LSN each transaction owns. Every run is non-empty
