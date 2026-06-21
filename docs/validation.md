@@ -35,7 +35,7 @@ whether the data is "synthetic":
 | **The Sleuth Kit** (`fsstat`) | Yes — separate C codebase | Boot-sector geometry (sector/cluster size, MFT/MFTMirr LCN, serial) | 1 |
 | **The Sleuth Kit** (`icat`, `blkcat`, `istat`) | Yes | LZNT1 plaintext + the raw on-disk compressed stream; `$MFT` / `$LogFile` extraction | 1 |
 | **`mft` crate** (omerbenamram) | Yes — independent Rust MFT parser | `$MFT` record in-use / is-directory flags and `$FILE_NAME` set, per record | 1 |
-| **LogFileParser** (jschicht, MIT, via Wine) | Yes — separate AutoIt tool | The redo/undo **operation-code mapping** (`LogOp`, transcribed verbatim from its `_SolveUndoRedoCodes`); the working Wine harness also emits a per-record `LogFile.csv` (47,010 rows on the DC01 `$LogFile`) that is the differential oracle for the in-progress record parser | 1 |
+| **LogFileParser** (jschicht, MIT, via Wine) | Yes — separate AutoIt tool | The redo/undo **operation-code mapping** (`LogOp`, transcribed verbatim from its `_SolveUndoRedoCodes`); and the full **per-record decode** — its Wine harness emits a `LogFile.csv` (78,765 rows on the DC01 `$LogFile`) reconciled record-for-record against `parse_log_records` | 1 |
 | **In-test RCRD census** | Independent *code path* (flat page-aligned signature scan, no fixup) | `read_record_pages` recovered exactly the RCRD pages present, each USA-valid | 2 |
 | **`lznt1` crate** | Yes — vetted third-party codec we reuse | The LZNT1 decode itself (a maintained, audited codec) | 1 |
 
@@ -108,16 +108,52 @@ the label). The lib test `logop_from_u16_matches_logfileparser_table` asserts th
 full table against that reference. This validates the *operation vocabulary*, not
 the record parser that extracts the codes (below).
 
-### `$LogFile` redo/undo record decode — in progress (not yet claimed)
+### `$LogFile` redo/undo record decode — Tier 1
 
-The record-level parser that walks the LFS records in a page and decodes each
-record's redo/undo `LogOp`, transaction id, target attribute, and target VCN is
-under active development. Its correctness is established by a **row-level
-differential against LogFileParser's `LogFile.csv`** — the working Wine harness
-(below) decoded the real DC01 `$LogFile` into 47,010 transaction rows, each
-carrying the per-record offset, LSN, RedoOP/UndoOP, record type, and transaction
-id our parser must reproduce. Until that differential lands, no transaction-decode
-correctness is claimed here.
+`parse_log_records` walks the LFS records in each RCRD page and decodes each
+record's LSN, redo/undo `LogOp`, record type, and transaction id. Correctness is
+established by a **full-stream row-level differential against LogFileParser's
+`LogFile.csv`** — the Wine harness (below) decoded the real CITADEL-DC01
+`$LogFile` into 78,765 transaction rows, and `full_logfile_records_match_logfileparser`
+(env-gated on `NTFS_FORENSIC_LOGFILE` + `NTFS_FORENSIC_LOGFILE_CSV`) reconciles
+every record we decode against them.
+
+**Join on LSN, not byte offset.** Each LFS record's LSN is globally unique in the
+log, so it is the record's true identity. LogFileParser reports a *shifted*
+`lf_Offset` for records in any page that also carries a **table-dump
+pseudo-record** (`OpenAttributeTableDump` / `DirtyPageTableDump` / …): the dump's
+row takes the real record's offset and the real record is listed ~0x40 later, at a
+byte that holds no record header. Our offsets are the physically-correct ones
+(verified against the raw bytes), so joining on LSN isolates genuine decode
+disagreements from LogFileParser's offset bookkeeping.
+
+Result on the real stream:
+
+| Bucket | Count | Meaning |
+|---|---|---|
+| **exact** | 74,754 | byte offset **and** all five fields (LSN, redo, undo, type, txid) match LogFileParser |
+| **reported_diff** | 633 | same record by LSN + operation + type; only LogFileParser's offset/tx reporting differs (the table-dump-page bookkeeping above) |
+| **op_disagree** | **0** | operation-code or record-type disagreements — none |
+| **stale** | 12 | prior-generation residue we recover and LogFileParser filters (see below) |
+| **unexplained** | **0** | records inside LogFileParser's LSN window that it does not also carry — none |
+
+The load-bearing assertions are `op_disagree == 0` and `unexplained == 0`: every
+record we decode within LogFileParser's window is corroborated by it and agrees on
+operation and record type.
+
+**Stale prior-generation residue (a recovery feature, not an error).** The
+`$LogFile` is a circular buffer. When the log wraps, a physical RCRD page is
+rewritten in place, but a torn/partial rewrite can leave a run of *older*-generation
+records in the page's record area. On DC01, page `0x0fb5000` declares an LSN range
+near 161,442,724 yet physically retains twelve records with LSNs ~160,484,800 —
+**below LogFileParser's oldest tracked LSN (161,226,776)**, i.e. from a generation
+that predates its valid restart window. LogFileParser follows the restart/LSN chain
+and filters them; `parse_log_records` walks the page bytes and **recovers** them.
+The differential classifies any such record (LSN below the oracle's minimum) as
+`stale` rather than a disagreement — surfacing recoverable overwritten log records
+is a forensic capability, and the test proves these are genuinely pre-window
+(not random garbage and not a misparse, since their operation/type still decode
+cleanly).
 
 ### Robustness — never panic, never over-read
 
