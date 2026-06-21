@@ -75,14 +75,21 @@ fn reads_all_rcrd_pages_from_real_logfile() {
         assert_eq!(&p.data[0..4], b"RCRD", "only RCRD pages returned");
         assert_eq!(p.offset % 4096, 0, "page-aligned offset");
     }
-    // A healthy ~17.5 MiB $LogFile is almost entirely RCRD record pages; assert
-    // the reader recovered the bulk of them rather than a brittle exact count
-    // (a hardcoded magic number tied to one image is the special-case smell).
-    let total_pages = data.len() / 4096;
-    assert!(
-        pages.len() > total_pages * 9 / 10,
-        "recovered only {} of {} pages as valid RCRD",
+
+    // Differential oracle: count raw RCRD signatures via a path independent of
+    // the reader (a flat page-aligned scan, no fixup), then require the reader
+    // to recover exactly that many. The two counts agree iff every RCRD page on
+    // this clean reference image (DC01 $LogFile) carries a valid USA — a damaged
+    // stream would yield fewer (USA-rejected pages), never more. The expected
+    // count is derived from the data structurally, not a hardcoded magic number.
+    let raw_rcrd = data
+        .chunks_exact(4096)
+        .filter(|page| &page[0..4] == b"RCRD")
+        .count();
+    assert!(pages.len() <= raw_rcrd, "reader must not invent pages");
+    assert_eq!(
         pages.len(),
-        total_pages,
+        raw_rcrd,
+        "every RCRD page on the clean DC01 reference image must have a valid USA",
     );
 }

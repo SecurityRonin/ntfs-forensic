@@ -70,8 +70,40 @@ pub struct RecordPage {
 /// be trusted. The fixup reuses [`crate::record::apply_fixup`], which is
 /// signature-agnostic (it reads `usa_offset`/`usa_count` from the shared
 /// multi-sector header that RCRD pages and FILE records both carry).
-pub fn read_record_pages(_data: &[u8]) -> Vec<RecordPage> {
-    Vec::new()
+pub fn read_record_pages(data: &[u8]) -> Vec<RecordPage> {
+    let mut pages = Vec::new();
+    let page_count = data.len() / LOG_PAGE_SIZE;
+
+    for page_idx in 0..page_count {
+        let offset = page_idx * LOG_PAGE_SIZE;
+
+        // page_count = data.len() / LOG_PAGE_SIZE guarantees a full page here.
+        let page = &data[offset..offset + LOG_PAGE_SIZE];
+        if &page[0..4] != RCRD_SIGNATURE {
+            continue;
+        }
+
+        // Apply the multi-sector USA fixup on a private copy. The on-disk page
+        // has the USN written into each 512-byte sector tail; apply_fixup
+        // verifies every tail matches the USN, then restores the displaced
+        // originals from the update sequence array. A mismatch (torn write /
+        // corruption / tampering) means the record bytes cannot be trusted, so
+        // the page is skipped rather than returned with un-fixed bytes.
+        let mut buf = page.to_vec();
+        if crate::record::apply_fixup(&mut buf, 512).is_err() {
+            continue;
+        }
+
+        let last_lsn = u64::from_le_bytes(buf[0x08..0x10].try_into().unwrap_or([0; 8]));
+
+        pages.push(RecordPage {
+            offset,
+            last_lsn,
+            data: buf,
+        });
+    }
+
+    pages
 }
 
 /// Parse NTFS $LogFile data.
@@ -207,6 +239,73 @@ mod tests {
         page[0..4].copy_from_slice(RCRD_SIGNATURE);
         page[0x18..0x20].copy_from_slice(&lsn.to_le_bytes());
         page
+    }
+
+    /// Build an RCRD page with a well-formed update sequence array, in the
+    /// on-disk form `apply_fixup` accepts: `usa_offset` 0x28, `usa_count` 9 (1 USN +
+    /// 8 protected 512-byte sectors), the USN written into each sector tail, and
+    /// distinct original values held in usa[1..9]. (The real-data equivalent is
+    /// exercised by `core/tests/logfile_rcrd.rs`; this synthetic page is for
+    /// per-branch lib coverage.)
+    fn make_rcrd_page_with_usa(last_lsn: u64) -> Vec<u8> {
+        let mut page = vec![0u8; LOG_PAGE_SIZE];
+        page[0..4].copy_from_slice(RCRD_SIGNATURE);
+        page[0x04..0x06].copy_from_slice(&0x28u16.to_le_bytes()); // usa_offset
+        page[0x06..0x08].copy_from_slice(&9u16.to_le_bytes()); // usa_count
+        page[0x08..0x10].copy_from_slice(&last_lsn.to_le_bytes()); // last_lsn @0x08
+        let usn: u16 = 0x0007;
+        page[0x28..0x2a].copy_from_slice(&usn.to_le_bytes()); // usa[0] = USN
+        for i in 0..8usize {
+            let original: u16 = 0xAA00 | i as u16;
+            let usa_slot = 0x2a + i * 2;
+            page[usa_slot..usa_slot + 2].copy_from_slice(&original.to_le_bytes());
+            let tail = (i + 1) * 512 - 2;
+            page[tail..tail + 2].copy_from_slice(&usn.to_le_bytes()); // USN in tail
+        }
+        page
+    }
+
+    #[test]
+    fn read_record_pages_accepts_valid_usa_page() {
+        let pages = read_record_pages(&make_rcrd_page_with_usa(0x1234));
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].offset, 0);
+        assert_eq!(pages[0].last_lsn, 0x1234);
+        // Sector-0 tail (0x1fe) restored from usa[1] = 0xAA00.
+        assert_eq!(&pages[0].data[0x1fe..0x200], &0xAA00u16.to_le_bytes());
+    }
+
+    #[test]
+    fn read_record_pages_skips_non_rcrd_pages() {
+        // RSTR and zeroed pages are not record pages → continue branch.
+        let mut data = make_rstr_page(1000);
+        data.extend_from_slice(&vec![0u8; LOG_PAGE_SIZE]);
+        assert!(read_record_pages(&data).is_empty());
+    }
+
+    #[test]
+    fn read_record_pages_skips_page_with_invalid_usa() {
+        // RCRD signature but usa_count is 0 → apply_fixup errors → page skipped.
+        let pages = read_record_pages(&make_rcrd_page(5000));
+        assert!(pages.is_empty());
+    }
+
+    #[test]
+    fn read_record_pages_empty_input() {
+        assert!(read_record_pages(&[]).is_empty());
+    }
+
+    #[test]
+    fn read_record_pages_returns_only_valid_pages_in_mixed_stream() {
+        // RSTR, valid-USA RCRD, invalid-USA RCRD, zeroed → exactly one recovered.
+        let mut data = make_rstr_page(1000);
+        data.extend_from_slice(&make_rcrd_page_with_usa(0xBEEF));
+        data.extend_from_slice(&make_rcrd_page(2000)); // usa_count 0 → rejected
+        data.extend_from_slice(&vec![0u8; LOG_PAGE_SIZE]);
+        let pages = read_record_pages(&data);
+        assert_eq!(pages.len(), 1);
+        assert_eq!(pages[0].offset, LOG_PAGE_SIZE);
+        assert_eq!(pages[0].last_lsn, 0xBEEF);
     }
 
     #[test]
