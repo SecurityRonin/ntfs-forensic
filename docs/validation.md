@@ -219,6 +219,70 @@ The load-bearing result is **Unknown = 0**: every redo/undo opcode the real DC01
 stream carries is a documented operation that the classifier maps — the mapping
 is complete over this corpus.
 
+### `$LogFile` transaction reconstruction — Tier 1 differential (per-txid LSN membership)
+
+`reconstruct_transactions` groups the decoded LFS records into transactions — the
+unit a forensic analyst reasons about (one user/OS action = one transaction of
+redo/undo records). NTFS keys this grouping on the **`transaction_id`** field
+(LFS record header offset `0x24`), which the Microsoft `LFS_RECORD` layout and
+the flatcap `linux-ntfs` `$LogFile` docs describe as the field that "groups
+related records into a single transaction". Records of concurrent transactions
+are *interleaved* in LSN order, so contiguity does not bound a transaction; the
+`transaction_id` does (TZWorks `mala` users guide: "each record has a pointer to
+the previous record in the chain for its transaction … consecutive records can be
+interleaved between multiple transactions"). The `client_previous_lsn` /
+`client_undo_next_lsn` back-pointers are the redo/undo *replay* chain, not the
+grouping key. Each transaction's state is read from the bounding control opcodes:
+`CommitTransaction` (0x1A) / `ForgetTransaction` (0x1B) ⇒ **Committed** (a commit
+overrides a compensation), `CompensationLogRecord` (0x01) alone ⇒ **Aborted**,
+neither ⇒ **Incomplete**. Sources: Microsoft `LFS_RECORD` / flatcap
+[`$LogFile` docs](https://flatcap.github.io/linux-ntfs/ntfs/files/logfile.html);
+TZWorks [`mala` users guide](https://tzworks.com/prototypes/mala/mala.users.guide.pdf);
+msuhanov [`dfir_ntfs/LogFile.py`](https://github.com/msuhanov/dfir_ntfs/blob/master/dfir_ntfs/LogFile.py);
+Brian Carrier, *File System Forensic Analysis* (2005), ch. 13.
+
+**Why Tier 1.** `LogFileParser`'s `LogFile.csv` carries an `lf_transaction_id`
+column — an *independent tool's* transaction assignment for the same real stream.
+`core/tests/logfile_rcrd.rs::transaction_membership_matches_logfileparser`
+(env-gated on `NTFS_FORENSIC_LOGFILE` + `NTFS_FORENSIC_LOGFILE_CSV`) groups the
+oracle rows by `lf_transaction_id`, groups our records by `reconstruct_transactions`,
+and reconciles the two **per transaction id by the SET of record LSNs** assigned
+to it. The comparison joins on LSN (each LSN is the record's globally-unique
+identity), so it is immune to the table-dump `lf_Offset` shift documented in the
+record differential above — only *which LSNs go in which transaction* is compared,
+never byte offsets.
+
+The reconciliation isolates the circular-buffer artifacts from genuine
+disagreement, exactly as the record differential does:
+
+- **stale** — records whose LSN is below the oracle's oldest tracked LSN are
+  prior-generation residue `LogFileParser` filters and we carve; they are excluded
+  from the per-txid set comparison (a recovery capability, not an error — see the
+  "Stale prior-generation residue" note above).
+- **`oracle_extra`** — an LSN the oracle never lists anywhere is recovery, not a
+  grouping error; an LSN the oracle lists under a *different* txid is a genuine
+  membership divergence and is the only thing counted against agreement.
+
+The load-bearing assertions are that the grouping **drops no record on the real
+stream** (every decoded record lands in exactly one transaction) and that the
+in-window per-txid LSN membership agrees with `LogFileParser` for the overwhelming
+majority (`> 0.98`). Any residual divergence — transactions whose boundary fell in
+an overwritten region of the wrap, or records the two tools window differently — is
+printed (`exact` / `divergent` / `absent_txid` / `stale_records` /
+`oracle_unseen_extra` counts plus a sample) and characterized, never silently
+tolerated. The record decode and LSN identity this reconciliation rests on are
+themselves Tier 1 (the `LogFileParser` row differential above).
+
+> Run the differential after extracting the real DC01 `$LogFile` and producing
+> `LogFile.csv` per the LogFileParser/Wine recipe under "Reproducing the
+> validation":
+>
+> ```bash
+> NTFS_FORENSIC_LOGFILE=DC01_LogFile.bin \
+> NTFS_FORENSIC_LOGFILE_CSV=LogFile.csv \
+>   cargo test -p ntfs-core --test logfile_rcrd transaction_membership -- --ignored --nocapture
+> ```
+
 ### Robustness — never panic, never over-read
 
 Every parser is fuzzed (seven `cargo-fuzz` targets: `boot`, `record`,
