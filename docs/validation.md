@@ -35,7 +35,7 @@ whether the data is "synthetic":
 | **The Sleuth Kit** (`fsstat`) | Yes — separate C codebase | Boot-sector geometry (sector/cluster size, MFT/MFTMirr LCN, serial) | 1 |
 | **The Sleuth Kit** (`icat`, `blkcat`, `istat`) | Yes | LZNT1 plaintext + the raw on-disk compressed stream; `$MFT` / `$LogFile` extraction | 1 |
 | **`mft` crate** (omerbenamram) | Yes — independent Rust MFT parser | `$MFT` record in-use / is-directory flags and `$FILE_NAME` set, per record | 1 |
-| **LogFileParser** (jschicht, MIT, via Wine) | Yes — separate AutoIt tool | `$LogFile` transaction decode (designated oracle for the in-progress redo/undo work) | 1 |
+| **LogFileParser** (jschicht, MIT, via Wine) | Yes — separate AutoIt tool | The redo/undo **operation-code mapping** (`LogOp`, transcribed verbatim from its `_SolveUndoRedoCodes`); the working Wine harness also emits a per-record `LogFile.csv` (47,010 rows on the DC01 `$LogFile`) that is the differential oracle for the in-progress record parser | 1 |
 | **In-test RCRD census** | Independent *code path* (flat page-aligned signature scan, no fixup) | `read_record_pages` recovered exactly the RCRD pages present, each USA-valid | 2 |
 | **`lznt1` crate** | Yes — vetted third-party codec we reuse | The LZNT1 decode itself (a maintained, audited codec) | 1 |
 
@@ -96,9 +96,28 @@ pages, each with a valid USA. A torn-sector page is rejected, never returned wit
 un-fixed bytes. The expected count is derived structurally from the data, not a
 hardcoded magic number.
 
-The transaction-level redo/undo decode that consumes these pages uses
-**LogFileParser** (via Wine) as its row-level differential oracle; that work is in
-progress and is not yet claimed as validated here.
+### `$LogFile` redo/undo operation codes (`LogOp`) — Tier 1
+
+`LogOp::from_u16` maps each NTFS Log File Service redo/undo operation code
+(`0x00`–`0x22`) to its operation, surfacing anything outside that range verbatim
+as `Unknown(u16)`. The mapping is **transcribed verbatim from LogFileParser's own
+`_SolveUndoRedoCodes` function** — the exact lookup its GUI runs to label the
+RedoOP/UndoOP columns — so the numeric mapping is identical to that tool's by
+construction (canonical spelling; the shared invariant is the numeric code, not
+the label). The lib test `logop_from_u16_matches_logfileparser_table` asserts the
+full table against that reference. This validates the *operation vocabulary*, not
+the record parser that extracts the codes (below).
+
+### `$LogFile` redo/undo record decode — in progress (not yet claimed)
+
+The record-level parser that walks the LFS records in a page and decodes each
+record's redo/undo `LogOp`, transaction id, target attribute, and target VCN is
+under active development. Its correctness is established by a **row-level
+differential against LogFileParser's `LogFile.csv`** — the working Wine harness
+(below) decoded the real DC01 `$LogFile` into 47,010 transaction rows, each
+carrying the per-record offset, LSN, RedoOP/UndoOP, record type, and transaction
+id our parser must reproduce. Until that differential lands, no transaction-decode
+correctness is claimed here.
 
 ### Robustness — never panic, never over-read
 
@@ -131,6 +150,20 @@ NTFS_FORENSIC_LOGFILE=DC01_LogFile.bin \
 NTFS_FORENSIC_TEST_IMAGE=/path/to/ntfs.raw \
   cargo test -p ntfs-core --test real_image -- --ignored
 ```
+
+The `$LogFile` transaction oracle is LogFileParser (jschicht) run under Wine — it
+emits a per-record `LogFile.csv` that the record parser is reconciled against:
+
+```bash
+# Produces LogFile.csv with lf_Offset / lf_LSN / lf_RedoOperation / lf_UndoOperation
+# / lf_record_type / lf_transaction_id — the row-level differential ground truth.
+WINEPREFIX=~/.wine wine LogFileParser64.exe \
+  /LogFileFile:Z:/path/to/DC01_LogFile.bin /OutputPath:Z:/tmp/lfp_out \
+  /SkipSqlite3:1 /SectorsPerCluster:8 /MftRecordSize:1024
+```
+
+> Gotcha: do not let the host sleep mid-run — the AutoIt GUI's event loop stalls
+> and the parse never completes.
 
 ## Coverage & fuzzing as backstops
 
