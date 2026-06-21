@@ -4,8 +4,10 @@
 //! areas and record pages, we can detect gaps that indicate journal clearing
 //! or corruption.
 
+pub mod semantics;
 pub mod usn_extractor;
 
+pub use semantics::{classify, FileOperation};
 pub use usn_extractor::{extract_usn_from_logfile, LogFileRecordSource, LogFileUsnRecord};
 
 use crate::error::Result;
