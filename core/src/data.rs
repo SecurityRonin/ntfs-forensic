@@ -560,6 +560,30 @@ mod tests {
     }
 
     #[test]
+    fn capped_read_stops_at_cap_and_is_a_true_prefix() {
+        // Three contiguous clusters (1,2,3) → 1536 bytes; cluster `c` holds byte
+        // `c`, so a cap that lands mid-stream must be a real prefix, not zeroes.
+        let runs = [Run {
+            length: 3,
+            lcn: Some(1),
+        }];
+        let mut full_vol = volume(4, 512);
+        let full = read_runs(&mut full_vol, &runs, 512, 1536).unwrap();
+        assert_eq!(full.len(), 1536);
+
+        let cap = 700usize; // crosses the first cluster boundary (512..1024)
+        let mut capped_vol = volume(4, 512);
+        let capped = read_runs_capped(&mut capped_vol, &runs, 512, 1536, cap as u64).unwrap();
+        assert!(capped.len() <= cap, "capped read must not exceed the cap");
+        assert_eq!(
+            capped.len(),
+            cap,
+            "cap is below the real size, so it bounds"
+        );
+        assert_eq!(capped[..], full[..cap], "capped bytes are a true prefix");
+    }
+
+    #[test]
     fn rejects_runlist_region_out_of_bounds() {
         use crate::attribute::{Attribute, AttributeBody};
         // runs_offset points past the attribute, so the runlist slice is invalid.

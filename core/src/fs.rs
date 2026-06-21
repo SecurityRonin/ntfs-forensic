@@ -922,6 +922,36 @@ mod tests {
     }
 
     #[test]
+    fn read_file_capped_truncates_nonresident_during_read() {
+        // split.bin is a multi-cluster non-resident file: 512 'A' + 512 'B'. A
+        // cap below its real size must stop materialising mid-stream and return a
+        // true prefix of the full read, not zeroes or garbage.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let full = fs.read_file("\\split.bin").unwrap();
+        assert_eq!(full.len(), 1024);
+
+        let cap = 600usize; // crosses the cluster boundary at 512
+        let mut fs2 = NtfsFs::open(build_volume()).unwrap();
+        let capped = fs2.read_file_capped("\\split.bin", cap).unwrap();
+        assert!(capped.len() <= cap, "capped read must not exceed the cap");
+        assert_eq!(capped.len(), cap);
+        assert_eq!(capped[..], full[..cap], "capped bytes are a true prefix");
+    }
+
+    #[test]
+    fn read_file_capped_truncates_resident_stream() {
+        // A resident $DATA is tiny, but the capped API must still honour the cap.
+        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        assert_eq!(fs.read_file_capped("\\test.txt", 5).unwrap(), b"hello");
+        // A cap at or above the real size returns the whole stream unchanged.
+        let mut fs2 = NtfsFs::open(build_volume()).unwrap();
+        assert_eq!(
+            fs2.read_file_capped("\\test.txt", 100).unwrap(),
+            b"hello world"
+        );
+    }
+
+    #[test]
     fn missing_path_is_not_found() {
         let mut fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(
