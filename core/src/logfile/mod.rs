@@ -5,9 +5,11 @@
 //! or corruption.
 
 pub mod semantics;
+pub mod transactions;
 pub mod usn_extractor;
 
 pub use semantics::{classify, FileOperation};
+pub use transactions::{reconstruct_transactions, Transaction, TransactionState};
 pub use usn_extractor::{extract_usn_from_logfile, LogFileRecordSource, LogFileUsnRecord};
 
 use crate::error::Result;

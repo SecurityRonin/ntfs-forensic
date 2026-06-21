@@ -66,7 +66,8 @@ pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use logfile::{
     classify as classify_log_operation, detect_journal_clearing, parse_log_records, parse_logfile,
-    read_record_pages, FileOperation, LogFileSummary, LogOp, LogRecord, RecordPage, RestartArea,
+    read_record_pages, reconstruct_transactions, FileOperation, LogFileSummary, LogOp, LogRecord,
+    RecordPage, RestartArea, Transaction, TransactionState,
 };
 /// LZNT1 decompression, re-exported from the `lznt1` crate (the codec NTFS uses
 /// for compressed `$DATA`).
