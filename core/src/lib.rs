@@ -65,7 +65,7 @@ pub use file_name::{FileName, FileReference};
 pub use fs::NtfsFs;
 pub use index::{parse_entries, parse_index_buffer, IndexEntry, IndexRoot};
 pub use logfile::{
-    detect_journal_clearing, parse_logfile, read_record_pages, LogFileSummary, RecordPage,
+    detect_journal_clearing, parse_logfile, read_record_pages, LogFileSummary, LogOp, RecordPage,
     RestartArea,
 };
 /// LZNT1 decompression, re-exported from the `lznt1` crate (the codec NTFS uses

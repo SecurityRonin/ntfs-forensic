@@ -42,6 +42,75 @@ pub struct LogFileSummary {
     pub highest_lsn: u64,
 }
 
+/// An NTFS $LogFile (LFS) redo/undo operation code.
+///
+/// These are the NTFS log-file-service operations (Brian Carrier, *File System
+/// Forensic Analysis*). The code→operation mapping is transcribed verbatim from
+/// the `_SolveUndoRedoCodes` function in jschicht's LogFileParser — the exact
+/// lookup its GUI runs to label the RedoOP/UndoOP columns — so this enum's
+/// mapping is identical to that tool's by construction. Names use the canonical
+/// spelling (LogFileParser carries a few typos, e.g. "Segement"); the invariant
+/// shared with the tool is the numeric code, not the label. A code outside the
+/// documented `0x00..=0x22` range is surfaced verbatim via [`LogOp::Unknown`],
+/// never silently mapped.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LogOp {
+    Noop,
+    CompensationLogRecord,
+    InitializeFileRecordSegment,
+    DeallocateFileRecordSegment,
+    WriteEndOfFileRecordSegment,
+    CreateAttribute,
+    DeleteAttribute,
+    UpdateResidentValue,
+    UpdateNonResidentValue,
+    UpdateMappingPairs,
+    DeleteDirtyClusters,
+    SetNewAttributeSizes,
+    AddIndexEntryRoot,
+    DeleteIndexEntryRoot,
+    AddIndexEntryAllocation,
+    DeleteIndexEntryAllocation,
+    WriteEndOfIndexBuffer,
+    SetIndexEntryVcnRoot,
+    SetIndexEntryVcnAllocation,
+    UpdateFileNameRoot,
+    UpdateFileNameAllocation,
+    SetBitsInNonResidentBitMap,
+    ClearBitsInNonResidentBitMap,
+    HotFix,
+    EndTopLevelAction,
+    PrepareTransaction,
+    CommitTransaction,
+    ForgetTransaction,
+    OpenNonResidentAttribute,
+    OpenAttributeTableDump,
+    AttributeNamesDump,
+    DirtyPageTableDump,
+    TransactionTableDump,
+    UpdateRecordDataRoot,
+    UpdateRecordDataAllocation,
+    /// A code outside the documented `0x00..=0x22` range, surfaced verbatim.
+    Unknown(u16),
+}
+
+impl LogOp {
+    /// Map a raw 16-bit redo/undo operation code to its operation.
+    #[must_use]
+    pub fn from_u16(code: u16) -> Self {
+        LogOp::Unknown(code)
+    }
+
+    /// The raw 16-bit operation code (inverse of [`LogOp::from_u16`]).
+    #[must_use]
+    pub fn code(self) -> u16 {
+        match self {
+            LogOp::Unknown(c) => c,
+            _ => 0,
+        }
+    }
+}
+
 /// One RCRD record page from $LogFile with its multi-sector USA fixup applied.
 ///
 /// `data` holds the page exactly as it was in memory before NTFS wrote the
@@ -223,6 +292,77 @@ pub fn detect_journal_clearing(logfile_summary: &LogFileSummary) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The complete code→operation mapping, transcribed verbatim from
+    /// LogFileParser's `_SolveUndoRedoCodes` (the function its GUI runs). Index =
+    /// the raw opcode; this is the authoritative reference `LogOp::from_u16` must
+    /// reproduce exactly. Canonical spelling differs from LogFileParser's typos
+    /// (e.g. its "Segement"); the shared invariant is the numeric code, asserted
+    /// here as the variant identity.
+    const LFP_OPS: [LogOp; 35] = [
+        LogOp::Noop,                         // 0x00
+        LogOp::CompensationLogRecord,        // 0x01
+        LogOp::InitializeFileRecordSegment,  // 0x02
+        LogOp::DeallocateFileRecordSegment,  // 0x03
+        LogOp::WriteEndOfFileRecordSegment,  // 0x04
+        LogOp::CreateAttribute,              // 0x05
+        LogOp::DeleteAttribute,              // 0x06
+        LogOp::UpdateResidentValue,          // 0x07
+        LogOp::UpdateNonResidentValue,       // 0x08
+        LogOp::UpdateMappingPairs,           // 0x09
+        LogOp::DeleteDirtyClusters,          // 0x0A
+        LogOp::SetNewAttributeSizes,         // 0x0B
+        LogOp::AddIndexEntryRoot,            // 0x0C
+        LogOp::DeleteIndexEntryRoot,         // 0x0D
+        LogOp::AddIndexEntryAllocation,      // 0x0E
+        LogOp::DeleteIndexEntryAllocation,   // 0x0F
+        LogOp::WriteEndOfIndexBuffer,        // 0x10
+        LogOp::SetIndexEntryVcnRoot,         // 0x11
+        LogOp::SetIndexEntryVcnAllocation,   // 0x12
+        LogOp::UpdateFileNameRoot,           // 0x13
+        LogOp::UpdateFileNameAllocation,     // 0x14
+        LogOp::SetBitsInNonResidentBitMap,   // 0x15
+        LogOp::ClearBitsInNonResidentBitMap, // 0x16
+        LogOp::HotFix,                       // 0x17
+        LogOp::EndTopLevelAction,            // 0x18
+        LogOp::PrepareTransaction,           // 0x19
+        LogOp::CommitTransaction,            // 0x1A
+        LogOp::ForgetTransaction,            // 0x1B
+        LogOp::OpenNonResidentAttribute,     // 0x1C
+        LogOp::OpenAttributeTableDump,       // 0x1D
+        LogOp::AttributeNamesDump,           // 0x1E
+        LogOp::DirtyPageTableDump,           // 0x1F
+        LogOp::TransactionTableDump,         // 0x20
+        LogOp::UpdateRecordDataRoot,         // 0x21
+        LogOp::UpdateRecordDataAllocation,   // 0x22
+    ];
+
+    #[test]
+    fn logop_from_u16_matches_logfileparser_table() {
+        for (code, &expected) in LFP_OPS.iter().enumerate() {
+            assert_eq!(
+                LogOp::from_u16(code as u16),
+                expected,
+                "opcode {code:#04x} must map to LogFileParser's operation"
+            );
+        }
+    }
+
+    #[test]
+    fn logop_unknown_surfaces_the_raw_code() {
+        // 0x23 is LogFileParser's internal "JS_NewEndOfRecord" marker, not a real
+        // NTFS operation; it and anything above the documented range are Unknown.
+        assert_eq!(LogOp::from_u16(0x23), LogOp::Unknown(0x23));
+        assert_eq!(LogOp::from_u16(0xFFFF), LogOp::Unknown(0xFFFF));
+    }
+
+    #[test]
+    fn logop_code_round_trips() {
+        for code in 0u16..=0x22 {
+            assert_eq!(LogOp::from_u16(code).code(), code, "round-trip {code:#04x}");
+        }
+        assert_eq!(LogOp::Unknown(0x99).code(), 0x99);
+    }
 
     fn make_rstr_page(lsn: u64) -> Vec<u8> {
         let mut page = vec![0u8; LOG_PAGE_SIZE];
