@@ -19,8 +19,8 @@ readme = "README.md"
 # members write `dep.workspace = true`. The inter-crate `ntfs-core` version
 # lives here too, so a bump touches one line instead of every member.
 [workspace.dependencies]
-ntfs-core = { path = "core", version = "0.8.0" }
-forensicnomicon = "0.5"
+ntfs-core = { path = "core", version = "0.8.2" }
+forensicnomicon = "0.11"
 thiserror = "2"
 lznt1 = "0.1"
 bitflags = "2"
