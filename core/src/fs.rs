@@ -950,6 +950,60 @@ mod tests {
     }
 
     #[test]
+    fn read_data_by_record_reads_default_and_named_streams() {
+        // The FileId-addressed read: the forensic-vfs FileSystem trait addresses
+        // nodes by MFT record, not path. Must match the path-based read_file.
+        let fs = NtfsFs::open(build_volume()).unwrap();
+        // record 6 = test.txt: default $DATA and a named ADS.
+        assert_eq!(
+            fs.read_data_by_record(6, None, u64::MAX).unwrap(),
+            b"hello world"
+        );
+        assert_eq!(
+            fs.read_data_by_record(6, Some("Zone.Identifier"), u64::MAX)
+                .unwrap(),
+            b"[ZoneTransfer]"
+        );
+        // record 9 = frag.txt: $DATA lives in an extension record — resolved by
+        // record number via $ATTRIBUTE_LIST, exactly like the path read.
+        assert_eq!(
+            fs.read_data_by_record(9, None, u64::MAX).unwrap(),
+            b"fragmented!"
+        );
+        // The byte cap is honoured mid-read.
+        assert_eq!(fs.read_data_by_record(6, None, 5).unwrap(), b"hello");
+        // A missing named stream is NotFound, naming the record.
+        assert!(matches!(
+            fs.read_data_by_record(6, Some("NoSuchStream"), u64::MAX),
+            Err(NtfsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn runs_by_record_returns_nonresident_runlist() {
+        // For FileSystem::extents: the assembled image runs of a data stream.
+        let fs = NtfsFs::open(build_volume()).unwrap();
+        // split.bin (record 7): non-resident $DATA across two clusters (LCN 26,27).
+        let runs = fs.runs_by_record(7, None).unwrap();
+        let total: u64 = runs.iter().map(|r| r.length).sum();
+        assert_eq!(total, 2, "split.bin spans two clusters");
+        assert_eq!(
+            runs.iter().filter_map(|r| r.lcn).collect::<Vec<_>>(),
+            vec![26, 27]
+        );
+        // A resident stream exists but has no image runs (bytes are inline).
+        assert!(
+            fs.runs_by_record(6, None).unwrap().is_empty(),
+            "resident $DATA has no runs"
+        );
+        // No such stream → NotFound.
+        assert!(matches!(
+            fs.runs_by_record(6, Some("NoSuchStream")),
+            Err(NtfsError::NotFound(_))
+        ));
+    }
+
+    #[test]
     fn read_named_stream_returns_ads_contents() {
         let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(
