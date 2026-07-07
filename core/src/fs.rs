@@ -218,6 +218,29 @@ impl<R: Read + Seek> NtfsFs<R> {
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         let rec_num = self.resolve_path(path)?;
+        self.read_data_by_record(rec_num, stream, max_bytes)
+    }
+
+    /// Read the `$DATA` attribute named `stream` (or the unnamed/default stream
+    /// when `None`) of MFT record `rec_num`, materializing at most `max_bytes`.
+    ///
+    /// The FileId-addressed counterpart to [`read_file`](Self::read_file): the
+    /// forensic-vfs `FileSystem` trait addresses nodes by MFT record, not path,
+    /// so `read_file` is now `resolve_path` + this method. Follows the record's
+    /// `$ATTRIBUTE_LIST` to extension records, assembles a fragmented
+    /// non-resident stream in VCN order, and LZNT1-decompresses a compressed
+    /// `$DATA`.
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the record has no matching `$DATA`, plus
+    /// record / runlist errors.
+    pub fn read_data_by_record(
+        &self,
+        rec_num: u64,
+        stream: Option<&str>,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
         let record = self.read_record(rec_num)?;
         // Gather the base record and any extension records the file's attributes
         // are spread across (via $ATTRIBUTE_LIST), then find the $DATA wherever
@@ -259,8 +282,8 @@ impl<R: Read + Seek> NtfsFs<R> {
         }
         if fragments.is_empty() {
             return Err(match stream {
-                Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
-                None => NtfsError::NotFound(format!("{path}::$DATA")),
+                Some(s) => NtfsError::NotFound(format!("record {rec_num}:{s}")),
+                None => NtfsError::NotFound(format!("record {rec_num}::$DATA")),
             });
         }
 
@@ -284,6 +307,53 @@ impl<R: Read + Seek> NtfsFs<R> {
             &fragments[0].3,
             max_bytes,
         )
+    }
+
+    /// The assembled image runs of the `$DATA` stream named `stream` (or the
+    /// unnamed/default stream when `None`) of MFT record `rec_num`, in VCN order.
+    ///
+    /// For the forensic-vfs `FileSystem::extents` contract: a **resident** stream
+    /// exists but occupies no image runs (its bytes are inline in the record), so
+    /// this returns an empty `Vec`; a **non-resident** stream returns its runlist,
+    /// reassembled across `$ATTRIBUTE_LIST` fragments. Distinct from a *missing*
+    /// stream, which is [`NtfsError::NotFound`].
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the record has no `$DATA` named `stream`, plus
+    /// record / runlist errors.
+    pub fn runs_by_record(&self, rec_num: u64, stream: Option<&str>) -> Result<Vec<Run>> {
+        let record = self.read_record(rec_num)?;
+        let records = self.gather_records(rec_num, &record)?;
+
+        let mut found = false;
+        // (start_vcn, record index, attribute) per non-resident fragment.
+        let mut fragments: Vec<(u64, usize, Attribute)> = Vec::new();
+        for (idx, rec_bytes) in records.iter().enumerate() {
+            for attr in record_attributes(rec_bytes)? {
+                if attr.type_code != attr_types::DATA || attr.name.as_deref() != stream {
+                    continue;
+                }
+                found = true;
+                if let AttributeBody::NonResident { start_vcn, .. } = &attr.body {
+                    fragments.push((*start_vcn, idx, attr));
+                }
+            }
+        }
+
+        if !found {
+            return Err(match stream {
+                Some(s) => NtfsError::NotFound(format!("record {rec_num}:{s}")),
+                None => NtfsError::NotFound(format!("record {rec_num}::$DATA")),
+            });
+        }
+
+        fragments.sort_by_key(|(start_vcn, _, _)| *start_vcn);
+        let mut runs = Vec::new();
+        for (_, idx, attr) in &fragments {
+            runs.extend(crate::data::attribute_runlist(&records[*idx], attr)?);
+        }
+        Ok(runs)
     }
 
     /// The base record plus every distinct extension record referenced by its
@@ -996,9 +1066,14 @@ mod tests {
             fs.runs_by_record(6, None).unwrap().is_empty(),
             "resident $DATA has no runs"
         );
-        // No such stream → NotFound.
+        // No such stream → NotFound (named and default arms).
         assert!(matches!(
             fs.runs_by_record(6, Some("NoSuchStream")),
+            Err(NtfsError::NotFound(_))
+        ));
+        // record 5 = root dir: no $DATA at all → default-stream NotFound arm.
+        assert!(matches!(
+            fs.runs_by_record(mft_records::ROOT, None),
             Err(NtfsError::NotFound(_))
         ));
     }
