@@ -1,0 +1,163 @@
+//! `impl FileSystem for NtfsFs`, driven as `Arc<dyn FileSystem>` over a REAL
+//! third-party NTFS volume (doer-checker).
+//!
+//! The fixture is `partition.dd` inside the committed `SampleTinyNtfsVolume.zip`
+//! (Joakim Schicht's LogFileParser sample, MIT). Every asserted value is what
+//! **The Sleuth Kit** (`fls` / `istat` / `fsstat`) reports independently of this
+//! crate — the tool is the oracle, not our own reader:
+//!
+//! ```text
+//! $ fsstat -f ntfs partition.dd    # Sector 512, Cluster 512
+//! $ fls    -f ntfs partition.dd    # root (rec 5) → file1.txt=37 … file8.txt=32
+//! $ istat  -f ntfs partition.dd 37 # file1.txt: $DATA Resident size 408, links 1
+//! $ istat  -f ntfs partition.dd 0  # $MFT: $DATA Non-Resident size 262144, LCN 4778
+//! ```
+
+#![cfg(feature = "vfs")]
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::io::{Cursor, Read};
+use std::sync::Arc;
+
+use forensic_vfs::{
+    FileId, FileSystem, FsKind, NodeKind, ResidencyKind, SectorSizes, StreamId, TimeZonePolicy,
+};
+use ntfs_core::NtfsFs;
+
+/// The committed LogFileParser sample volume — a 7 MiB deflated raw NTFS
+/// partition. `tests/` is excluded from the published tarball, so `include_bytes!`
+/// of the repo-root fixture is safe here (matches `parity_mft.rs` / `real_image.rs`).
+const SAMPLE_ZIP: &[u8] = include_bytes!("../../tests/data/SampleTinyNtfsVolume.zip");
+
+/// Extract `partition.dd` from the zip in memory and open it as an
+/// `Arc<dyn FileSystem>` — proving `NtfsFs` composes object-safely.
+fn open_real_volume() -> Arc<dyn FileSystem> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(SAMPLE_ZIP)).expect("open sample zip");
+    let mut dd = Vec::new();
+    archive
+        .by_name("SampleTinyNtfsVolume/partition.dd")
+        .expect("partition.dd present")
+        .read_to_end(&mut dd)
+        .expect("read partition.dd");
+    let fs = NtfsFs::open(Cursor::new(dd)).expect("open NTFS volume");
+    Arc::new(fs)
+}
+
+#[test]
+fn identity_matches_tsk_geometry() {
+    let fs = open_real_volume();
+    assert_eq!(fs.kind(), FsKind::Ntfs);
+    assert_eq!(fs.timestamp_zone(), TimeZonePolicy::Utc);
+    // fsstat: sector 512, cluster 512.
+    assert_eq!(
+        fs.sector_sizes(),
+        SectorSizes {
+            logical: 512,
+            physical: 512,
+            cluster_or_block: 512,
+        }
+    );
+    // The NTFS root directory is record 5; istat reports its sequence as 5.
+    assert_eq!(fs.root(), FileId::NtfsRef { entry: 5, seq: 5 });
+}
+
+#[test]
+fn read_dir_lists_real_root_entries() {
+    let fs = open_real_volume();
+    let entries: Vec<_> = fs
+        .read_dir(fs.root())
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    // fls: file1.txt is inode 37, a regular file.
+    let file1 = entries
+        .iter()
+        .find(|e| e.name == b"file1.txt")
+        .expect("file1.txt in root");
+    assert_eq!(file1.id, FileId::NtfsRef { entry: 37, seq: 1 });
+    assert_eq!(file1.kind, NodeKind::File);
+
+    // All eight user files are enumerated.
+    for n in 1..=8 {
+        let name = format!("file{n}.txt");
+        assert!(
+            entries.iter().any(|e| e.name == name.as_bytes()),
+            "root should list {name}"
+        );
+    }
+}
+
+#[test]
+fn lookup_finds_a_known_file() {
+    let fs = open_real_volume();
+    assert_eq!(
+        fs.lookup(fs.root(), b"file1.txt").unwrap(),
+        Some(FileId::NtfsRef { entry: 37, seq: 1 })
+    );
+    assert_eq!(fs.lookup(fs.root(), b"no-such-file").unwrap(), None);
+}
+
+#[test]
+fn meta_matches_istat() {
+    let fs = open_real_volume();
+    let m = fs.meta(FileId::NtfsRef { entry: 37, seq: 1 }).unwrap();
+
+    assert_eq!(m.ino, 37);
+    assert_eq!(m.kind, NodeKind::File);
+    assert_eq!(m.nlink, 1); // istat: Links: 1
+                            // istat: $DATA Resident, size 408.
+    assert_eq!(m.size, 408);
+    assert_eq!(m.residency, ResidencyKind::Resident { inline_len: 408 });
+
+    // istat SI times: Created 2013-05-01, Modified 2013-04-28 — created is later,
+    // proving born/modified map to the correct (distinct) $SI fields.
+    let born = m.times.born.expect("born present");
+    let modified = m.times.modified.expect("modified present");
+    assert!(
+        born.unix_nanos > modified.unix_nanos,
+        "created (2013-05-01) is later than modified (2013-04-28)"
+    );
+}
+
+#[test]
+fn read_at_returns_file_bytes() {
+    let fs = open_real_volume();
+    let id = FileId::NtfsRef { entry: 37, seq: 1 };
+
+    // icat: file1.txt is 408 bytes beginning "Just some bogus text".
+    let mut buf = [0u8; 1024];
+    let n = fs.read_at(id, StreamId::Default, 0, &mut buf).unwrap();
+    assert_eq!(n, 408);
+    assert_eq!(&buf[..15], b"Just some bogus");
+
+    // A non-zero offset returns the windowed suffix.
+    let mut win = [0u8; 16];
+    let n = fs.read_at(id, StreamId::Default, 5, &mut win).unwrap();
+    assert_eq!(&win[..n], b"some bogus text ");
+
+    // Reading past the end yields zero bytes, not an error.
+    assert_eq!(
+        fs.read_at(id, StreamId::Default, 10_000, &mut buf).unwrap(),
+        0
+    );
+}
+
+#[test]
+fn extents_returns_mft_runs() {
+    let fs = open_real_volume();
+    // $MFT (record 0): istat → $DATA Non-Resident, size 262144, first LCN 4778.
+    let runs: Vec<_> = fs
+        .extents(FileId::NtfsRef { entry: 0, seq: 1 }, StreamId::Default)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+
+    assert!(!runs.is_empty(), "$MFT $DATA is non-resident");
+    // First run starts at the first MFT cluster: 4778 * 512 bytes.
+    assert_eq!(runs[0].run.image_offset, 4778 * 512);
+    assert!(!runs[0].run.flags.sparse);
+    // The runs cover the whole (fully-allocated) 262144-byte $MFT $DATA.
+    let total: u64 = runs.iter().map(|r| r.run.len).sum();
+    assert_eq!(total, 262_144);
+}
