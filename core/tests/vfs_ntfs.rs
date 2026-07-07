@@ -2,7 +2,7 @@
 //! third-party NTFS volume (doer-checker).
 //!
 //! The fixture is `partition.dd` inside the committed `SampleTinyNtfsVolume.zip`
-//! (Joakim Schicht's LogFileParser sample, MIT). Every asserted value is what
+//! (Joakim Schicht's `LogFileParser` sample, MIT). Every asserted value is what
 //! **The Sleuth Kit** (`fls` / `istat` / `fsstat`) reports independently of this
 //! crate — the tool is the oracle, not our own reader:
 //!
@@ -24,7 +24,7 @@ use forensic_vfs::{
 };
 use ntfs_core::NtfsFs;
 
-/// The committed LogFileParser sample volume — a 7 MiB deflated raw NTFS
+/// The committed `LogFileParser` sample volume — a 7 MiB deflated raw NTFS
 /// partition. `tests/` is excluded from the published tarball, so `include_bytes!`
 /// of the repo-root fixture is safe here (matches `parity_mft.rs` / `real_image.rs`).
 const SAMPLE_ZIP: &[u8] = include_bytes!("../../tests/data/SampleTinyNtfsVolume.zip");

@@ -54,6 +54,8 @@ pub mod source;
 pub mod standard_information;
 pub mod time;
 pub mod usn;
+#[cfg(feature = "vfs")]
+mod vfs;
 
 pub use attribute::{parse_attributes, Attribute, AttributeBody};
 pub use attribute_list::{parse as parse_attribute_list, AttributeListEntry};
