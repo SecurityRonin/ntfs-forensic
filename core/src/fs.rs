@@ -902,6 +902,26 @@ mod tests {
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
     }
 
+    /// The reader must serve reads through a shared `&self` so N workers share
+    /// one parsed MFT (no per-thread re-parse) — the enabler for the forensic-vfs
+    /// `FileSystem` trait, whose reads are all `&self`. Fails to compile until
+    /// every read method takes `&self` and `NtfsFs` is `Sync`.
+    #[test]
+    fn reads_through_shared_ref_across_threads() {
+        let fs = NtfsFs::open(build_volume()).unwrap(); // non-mut binding
+        std::thread::scope(|s| {
+            let fs = &fs; // requires NtfsFs: Sync
+            for _ in 0..8 {
+                s.spawn(move || {
+                    // &self reads shared across threads — no &mut, no re-open.
+                    let rec = fs.read_record(6).unwrap();
+                    assert_eq!(&rec[0..4], b"FILE");
+                    assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+                });
+            }
+        });
+    }
+
     #[test]
     fn read_named_stream_returns_ads_contents() {
         let mut fs = NtfsFs::open(build_volume()).unwrap();
