@@ -4,6 +4,8 @@
 //! at 1024-byte boundaries), validates each candidate, and extracts identity
 //! fields needed for path resolution via the Rewind engine.
 
+use forensic_bytes::{le_u16, le_u32, le_u64};
+
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 /// MFT entry signature: "FILE"
@@ -114,21 +116,21 @@ fn try_carve_entry(
     let entry = &data[offset..offset + MFT_ENTRY_SIZE];
 
     // Validate sequence number (0 = never used)
-    let sequence_number = read_u16_le(entry, 16);
+    let sequence_number = le_u16(entry, 16);
     if sequence_number == 0 {
         stats.rejected += 1;
         return None;
     }
 
     // Validate first attribute offset
-    let first_attr_offset = read_u16_le(entry, 20) as usize;
+    let first_attr_offset = le_u16(entry, 20) as usize;
     if !(48..MFT_ENTRY_SIZE - 8).contains(&first_attr_offset) {
         stats.rejected += 1;
         return None;
     }
 
-    let flags = read_u16_le(entry, 22);
-    let entry_number = u64::from(read_u32_le(entry, 44));
+    let flags = le_u16(entry, 22);
+    let entry_number = u64::from(le_u32(entry, 44));
 
     // Walk attributes looking for FILE_NAME (0x30)
     let mut best_filename: Option<(String, u64, u16, u8)> = None; // (name, parent_entry, parent_seq, namespace)
@@ -136,13 +138,13 @@ fn try_carve_entry(
     let mut attrs_walked = 0;
 
     while attr_offset + 8 <= MFT_ENTRY_SIZE && attrs_walked < MAX_ATTR_WALK {
-        let attr_type = read_u32_le(entry, attr_offset);
+        let attr_type = le_u32(entry, attr_offset);
 
         if attr_type == ATTR_END_MARKER {
             break;
         }
 
-        let attr_len = read_u32_le(entry, attr_offset + 4) as usize;
+        let attr_len = le_u32(entry, attr_offset + 4) as usize;
         if attr_len < 8 || attr_offset + attr_len > MFT_ENTRY_SIZE {
             break; // corrupt attribute chain
         }
@@ -196,8 +198,8 @@ fn try_carve_entry(
 /// Parse a FILE_NAME attribute and extract identity fields.
 /// Returns (filename, `parent_entry`, `parent_sequence`, namespace).
 fn parse_filename_attr(entry: &[u8], attr_offset: usize) -> Option<(String, u64, u16, u8)> {
-    let content_offset = read_u16_le(entry, attr_offset + 20) as usize;
-    let content_size = read_u32_le(entry, attr_offset + 16) as usize;
+    let content_offset = le_u16(entry, attr_offset + 20) as usize;
+    let content_size = le_u32(entry, attr_offset + 16) as usize;
 
     let fn_start = attr_offset + content_offset;
     if fn_start + 66 > entry.len() || content_size < 66 {
@@ -205,7 +207,7 @@ fn parse_filename_attr(entry: &[u8], attr_offset: usize) -> Option<(String, u64,
     }
 
     // Parent file reference
-    let parent_ref = read_u64_le(entry, fn_start);
+    let parent_ref = le_u64(entry, fn_start);
     let parent_entry = parent_ref & 0x0000_FFFF_FFFF_FFFF;
     let parent_sequence = (parent_ref >> 48) as u16;
 
@@ -220,45 +222,17 @@ fn parse_filename_attr(entry: &[u8], attr_offset: usize) -> Option<(String, u64,
     let name_bytes_start = fn_start + 66;
     let name_bytes_end = name_bytes_start + name_len_chars * 2;
     if name_bytes_end > entry.len()
-        || name_bytes_end > attr_offset + read_u32_le(entry, attr_offset + 4) as usize
+        || name_bytes_end > attr_offset + le_u32(entry, attr_offset + 4) as usize
     {
         return None;
     }
 
     let name_u16: Vec<u16> = (0..name_len_chars)
-        .map(|i| read_u16_le(entry, name_bytes_start + i * 2))
+        .map(|i| le_u16(entry, name_bytes_start + i * 2))
         .collect();
     let filename = String::from_utf16_lossy(&name_u16);
 
     Some((filename, parent_entry, parent_sequence, namespace))
-}
-
-// ─── Binary helpers ──────────────────────────────────────────────────────────
-
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
-}
-
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ])
 }
 
 // ─── Tests ───────────────────────────────────────────────────────────────────
@@ -384,6 +358,31 @@ mod tests {
         }
 
         attr_size
+    }
+
+    // ─── Test: crafted FILE_NAME attr near the entry end must not panic ──────
+
+    #[test]
+    fn crafted_filename_attr_near_end_does_not_panic() {
+        // A FILE_NAME attribute placed so parse_filename_attr's read at
+        // `attr_offset + 20` lands past the 1024-byte entry. Direct-index readers
+        // panic on this OOB (a DoS on a crafted MFT); the record must instead be
+        // rejected without panicking.
+        let mut e = vec![0u8; MFT_ENTRY_SIZE];
+        e[0..4].copy_from_slice(&FILE_SIGNATURE);
+        e[16..18].copy_from_slice(&1u16.to_le_bytes()); // sequence != 0
+        let fao: u16 = 1005; // in [48, MFT_ENTRY_SIZE - 8)
+        e[20..22].copy_from_slice(&fao.to_le_bytes());
+        let ao = fao as usize;
+        e[ao..ao + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        e[ao + 4..ao + 8].copy_from_slice(&16u32.to_le_bytes()); // attr_len (>=8, ao+len<=1024)
+        e[ao + 8] = 0; // resident flag → reaches parse_filename_attr
+                       // parse_filename_attr reads at ao+20 = 1025, one past the entry.
+        let (entries, _stats) = carve_mft_entries(&e);
+        assert!(
+            entries.is_empty(),
+            "the malformed record must be rejected, not carved"
+        );
     }
 
     // ─── Test: empty/garbage data ────────────────────────────────────────────
