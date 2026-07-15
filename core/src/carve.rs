@@ -386,6 +386,31 @@ mod tests {
         attr_size
     }
 
+    // ─── Test: crafted FILE_NAME attr near the entry end must not panic ──────
+
+    #[test]
+    fn crafted_filename_attr_near_end_does_not_panic() {
+        // A FILE_NAME attribute placed so parse_filename_attr's read at
+        // `attr_offset + 20` lands past the 1024-byte entry. Direct-index readers
+        // panic on this OOB (a DoS on a crafted MFT); the record must instead be
+        // rejected without panicking.
+        let mut e = vec![0u8; MFT_ENTRY_SIZE];
+        e[0..4].copy_from_slice(&FILE_SIGNATURE);
+        e[16..18].copy_from_slice(&1u16.to_le_bytes()); // sequence != 0
+        let fao: u16 = 1005; // in [48, MFT_ENTRY_SIZE - 8)
+        e[20..22].copy_from_slice(&fao.to_le_bytes());
+        let ao = fao as usize;
+        e[ao..ao + 4].copy_from_slice(&ATTR_FILE_NAME.to_le_bytes());
+        e[ao + 4..ao + 8].copy_from_slice(&16u32.to_le_bytes()); // attr_len (>=8, ao+len<=1024)
+        e[ao + 8] = 0; // resident flag → reaches parse_filename_attr
+                       // parse_filename_attr reads at ao+20 = 1025, one past the entry.
+        let (entries, _stats) = carve_mft_entries(&e);
+        assert!(
+            entries.is_empty(),
+            "the malformed record must be rejected, not carved"
+        );
+    }
+
     // ─── Test: empty/garbage data ────────────────────────────────────────────
 
     #[test]
