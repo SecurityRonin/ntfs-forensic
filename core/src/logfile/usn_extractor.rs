@@ -8,6 +8,7 @@
 //! Inspired by ntfs-linker's TriForce approach.
 
 use crate::usn::{parse_usn_record_v2, UsnRecord};
+use forensic_bytes::{le_u16, le_u32, le_u64};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -53,34 +54,6 @@ pub struct LogFileUsnRecord {
     pub source: LogFileRecordSource,
     /// The parsed USN record.
     pub record: UsnRecord,
-}
-
-// ─── Binary helpers ──────────────────────────────────────────────────────────
-
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([data[offset], data[offset + 1]])
-}
-
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    u32::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-    ])
-}
-
-fn read_u64_le(data: &[u8], offset: usize) -> u64 {
-    u64::from_le_bytes([
-        data[offset],
-        data[offset + 1],
-        data[offset + 2],
-        data[offset + 3],
-        data[offset + 4],
-        data[offset + 5],
-        data[offset + 6],
-        data[offset + 7],
-    ])
 }
 
 // ─── Core extraction logic ──────────────────────────────────────────────────
@@ -159,7 +132,7 @@ fn extract_from_rcrd_page(page_data: &[u8], page_offset: usize) -> Vec<LogFileUs
     // Extract the last_end_lsn from the RCRD page header at offset 0x18.
     // This is the highest LSN represented in this page.
     let page_lsn = if page_data.len() >= 0x20 {
-        read_u64_le(page_data, 0x18)
+        le_u64(page_data, 0x18)
     } else {
         0 // cov:unreachable: the page_data.len() < RCRD_DATA_OFFSET (0x40) guard above dominates ⇒ page_data.len() ≥ 0x40 ≥ 0x20
     };
@@ -178,14 +151,14 @@ fn extract_from_rcrd_page(page_data: &[u8], page_offset: usize) -> Vec<LogFileUs
         }
 
         // Read the log record header fields
-        let this_lsn = read_u64_le(data_area, record_offset);
-        let client_data_length = read_u32_le(data_area, record_offset + 0x18) as usize;
-        let _redo_op = read_u16_le(data_area, record_offset + 0x30);
-        let _undo_op = read_u16_le(data_area, record_offset + 0x32);
-        let redo_offset = read_u16_le(data_area, record_offset + 0x34) as usize;
-        let redo_length = read_u16_le(data_area, record_offset + 0x36) as usize;
-        let undo_offset = read_u16_le(data_area, record_offset + 0x38) as usize;
-        let undo_length = read_u16_le(data_area, record_offset + 0x3A) as usize;
+        let this_lsn = le_u64(data_area, record_offset);
+        let client_data_length = le_u32(data_area, record_offset + 0x18) as usize;
+        let _redo_op = le_u16(data_area, record_offset + 0x30);
+        let _undo_op = le_u16(data_area, record_offset + 0x32);
+        let redo_offset = le_u16(data_area, record_offset + 0x34) as usize;
+        let redo_length = le_u16(data_area, record_offset + 0x36) as usize;
+        let undo_offset = le_u16(data_area, record_offset + 0x38) as usize;
+        let undo_length = le_u16(data_area, record_offset + 0x3A) as usize;
 
         // The redo/undo offsets are relative to offset 0x30 in the log record header
         let redo_base = record_offset + 0x30;

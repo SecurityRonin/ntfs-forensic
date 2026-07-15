@@ -32,11 +32,26 @@ forensicnomicon = { workspace = true }
 # timestamp conversion for $UsnJrnl:$J records.
 bitflags = { workspace = true }
 chrono = { workspace = true }
+# Shared never-panic bounded byte readers (offset/length fields from untrusted
+# images) — replaces per-module copies of le_u16/le_u32/le_u64.
+forensic-bytes = { version = "0.1", path = "../../forensic-bytes" }
+# forensic-vfs (KNOWLEDGE leaf) — the read-only FileSystem navigation contract.
+# Optional so a bare reader stays dependency-light; the `vfs` feature turns on
+# the `impl FileSystem for NtfsFs` adapter so an NTFS volume composes as
+# `Arc<dyn FileSystem>`.
+forensic-vfs = { version = "0.1", optional = true }
+
+[features]
+# Adapt `NtfsFs` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`).
+vfs = ["dep:forensic-vfs"]
 
 [dev-dependencies]
 # Independent oracle for doer-checker validation against real $MFT images
 # (parity gate in tests/parity_mft.rs). MIT/Apache-2.0 â dev-only, no GPL.
 mft = { workspace = true }
+# Extract the committed real NTFS partition (`partition.dd`) from the deflated
+# LogFileParser sample zip for the vfs FileSystem-trait test. Deflate only.
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

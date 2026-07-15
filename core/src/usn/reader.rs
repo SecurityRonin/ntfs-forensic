@@ -9,26 +9,9 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::Result;
 use crate::usn::{parse_usn_record_v2, parse_usn_record_v3, UsnRecord};
+use forensic_bytes::{le_u16, le_u32};
 
 const BUF_SIZE: usize = 64 * 1024; // 64KB read buffer
-
-/// Reads a little-endian `u32` at `offset`, yielding 0 if out of bounds.
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let mut b = [0u8; 4];
-    if let Some(s) = data.get(offset..offset + 4) {
-        b.copy_from_slice(s);
-    }
-    u32::from_le_bytes(b)
-}
-
-/// Reads a little-endian `u16` at `offset`, yielding 0 if out of bounds.
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    let mut b = [0u8; 2];
-    if let Some(s) = data.get(offset..offset + 2) {
-        b.copy_from_slice(s);
-    }
-    u16::from_le_bytes(b)
-}
 
 /// Streaming iterator over USN records from a reader.
 ///
@@ -149,7 +132,7 @@ impl<R: Read + Seek> Iterator for UsnJournalReader<R> {
             }
         }
 
-        let record_len = read_u32_le(&self.buf, self.buf_offset) as usize;
+        let record_len = le_u32(&self.buf, self.buf_offset) as usize;
 
         if !(8..=65536).contains(&record_len) {
             self.buf_offset += 8;
@@ -167,7 +150,7 @@ impl<R: Read + Seek> Iterator for UsnJournalReader<R> {
             }
         }
 
-        let version = read_u16_le(&self.buf, self.buf_offset + 4);
+        let version = le_u16(&self.buf, self.buf_offset + 4);
 
         let Some(record_data) = self.buf.get(self.buf_offset..self.buf_offset + record_len) else {
             self.buf_offset += 8; // cov:unreachable: the buf_offset + record_len <= buf_len (<= BUF_SIZE == buf.len()) check above dominates, so this get is always Some

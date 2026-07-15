@@ -8,6 +8,7 @@
 //! the root (record 5) and reads the file's unnamed `$DATA`.
 
 use std::io::{Read, Seek, SeekFrom};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 use forensicnomicon::ntfs::{attr_types, mft_records};
 
@@ -20,8 +21,15 @@ use crate::record::{apply_fixup, MftRecordHeader};
 use crate::runlist::{self, Run};
 
 /// A read-only NTFS filesystem over a seekable volume.
+///
+/// The source lives behind a [`Mutex`] so every read takes `&self`: N workers
+/// share one handle and one parsed MFT (the `boot`/`mft_runs` bootstrap happens
+/// once at [`open`](NtfsFs::open)), which is what lets a single `NtfsFs` back the
+/// forensic-vfs `FileSystem` trait. Raw disk reads serialize on the lock; the
+/// expensive MFT parse does not. A future positioned-read source would make the
+/// raw reads lock-free too, but the shared-handle contract holds today.
 pub struct NtfsFs<R: Read + Seek> {
-    reader: R,
+    reader: Mutex<R>,
     boot: BootSector,
     mft_runs: Vec<Run>,
 }
@@ -47,7 +55,7 @@ impl<R: Read + Seek> NtfsFs<R> {
         let mft_runs = bootstrap_mft_runs(&mut reader, &rec0, &boot)?;
 
         Ok(NtfsFs {
-            reader,
+            reader: Mutex::new(reader),
             boot,
             mft_runs,
         })
@@ -59,24 +67,37 @@ impl<R: Read + Seek> NtfsFs<R> {
         &self.boot
     }
 
+    /// Lock the interior reader, recovering a poisoned guard instead of
+    /// panicking (Paranoid Gatekeeper: no `unwrap`). Poisoning can only arise if
+    /// a prior holder panicked mid-read; the bytes under the lock are unaffected,
+    /// so recovering the guard is the correct, non-panicking behaviour. The lock
+    /// is never held across a call to another `&self` reader method, so the
+    /// non-reentrant `Mutex` cannot deadlock.
+    fn lock_reader(&self) -> MutexGuard<'_, R> {
+        self.reader.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Read MFT record `n` (raw bytes, update-sequence fixup applied).
     ///
     /// # Errors
     ///
     /// [`NtfsError::BadRunlist`] if the record lies outside the MFT, plus
     /// record / fixup errors.
-    pub fn read_record(&mut self, n: u64) -> Result<Vec<u8>> {
+    pub fn read_record(&self, n: u64) -> Result<Vec<u8>> {
         let rec_size = self.boot.mft_record_size;
         let virt = n
             .checked_mul(rec_size)
             .ok_or(NtfsError::BadRunlist("record offset overflow"))?;
-        let mut buf = read_virtual(
-            &mut self.reader,
-            &self.mft_runs,
-            self.boot.cluster_size(),
-            virt,
-            rec_size,
-        )?;
+        let mut buf = {
+            let mut reader = self.lock_reader();
+            read_virtual(
+                &mut *reader,
+                &self.mft_runs,
+                self.boot.cluster_size(),
+                virt,
+                rec_size,
+            )?
+        };
         apply_fixup(&mut buf, self.boot.bytes_per_sector as usize)?;
         Ok(buf)
     }
@@ -87,7 +108,7 @@ impl<R: Read + Seek> NtfsFs<R> {
     ///
     /// [`NtfsError::NotADirectory`] if the record has no `$INDEX_ROOT`, plus
     /// index errors.
-    pub fn directory_entries(&mut self, record: &[u8]) -> Result<Vec<IndexEntry>> {
+    pub fn directory_entries(&self, record: &[u8]) -> Result<Vec<IndexEntry>> {
         let attrs = record_attributes(record)?;
 
         let root_attr = attrs
@@ -110,12 +131,10 @@ impl<R: Read + Seek> NtfsFs<R> {
                 .iter()
                 .find(|a| a.type_code == attr_types::INDEX_ALLOCATION)
             {
-                let data = read_attribute_value(
-                    &mut self.reader,
-                    record,
-                    alloc,
-                    self.boot.cluster_size(),
-                )?;
+                let data = {
+                    let mut reader = self.lock_reader();
+                    read_attribute_value(&mut *reader, record, alloc, self.boot.cluster_size())?
+                };
                 let irs = self.boot.index_record_size as usize;
                 let mut off = 0;
                 while off + irs <= data.len() {
@@ -138,7 +157,7 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// # Errors
     ///
     /// [`NtfsError::NotFound`] for a missing component.
-    pub fn resolve_path(&mut self, path: &str) -> Result<u64> {
+    pub fn resolve_path(&self, path: &str) -> Result<u64> {
         let mut current = mft_records::ROOT;
         for component in path.split(['\\', '/']).filter(|c| !c.is_empty()) {
             let record = self.read_record(current)?;
@@ -161,7 +180,7 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// # Errors
     ///
     /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
-    pub fn read_file(&mut self, path: &str) -> Result<Vec<u8>> {
+    pub fn read_file(&self, path: &str) -> Result<Vec<u8>> {
         self.read_data_stream(path, None, u64::MAX)
     }
 
@@ -176,7 +195,7 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// # Errors
     ///
     /// [`NtfsError::NotFound`] if the path or its `$DATA` is missing.
-    pub fn read_file_capped(&mut self, path: &str, max_bytes: usize) -> Result<Vec<u8>> {
+    pub fn read_file_capped(&self, path: &str, max_bytes: usize) -> Result<Vec<u8>> {
         self.read_data_stream(path, None, max_bytes as u64)
     }
 
@@ -186,19 +205,42 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// # Errors
     ///
     /// [`NtfsError::NotFound`] if the path or the named stream is missing.
-    pub fn read_named_stream(&mut self, path: &str, stream: &str) -> Result<Vec<u8>> {
+    pub fn read_named_stream(&self, path: &str, stream: &str) -> Result<Vec<u8>> {
         self.read_data_stream(path, Some(stream), u64::MAX)
     }
 
     /// Read the `$DATA` attribute named `stream` (or the unnamed/default stream
     /// when `None`) of the file at `path`, materializing at most `max_bytes`.
     fn read_data_stream(
-        &mut self,
+        &self,
         path: &str,
         stream: Option<&str>,
         max_bytes: u64,
     ) -> Result<Vec<u8>> {
         let rec_num = self.resolve_path(path)?;
+        self.read_data_by_record(rec_num, stream, max_bytes)
+    }
+
+    /// Read the `$DATA` attribute named `stream` (or the unnamed/default stream
+    /// when `None`) of MFT record `rec_num`, materializing at most `max_bytes`.
+    ///
+    /// The FileId-addressed counterpart to [`read_file`](Self::read_file): the
+    /// forensic-vfs `FileSystem` trait addresses nodes by MFT record, not path,
+    /// so `read_file` is now `resolve_path` + this method. Follows the record's
+    /// `$ATTRIBUTE_LIST` to extension records, assembles a fragmented
+    /// non-resident stream in VCN order, and LZNT1-decompresses a compressed
+    /// `$DATA`.
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the record has no matching `$DATA`, plus
+    /// record / runlist errors.
+    pub fn read_data_by_record(
+        &self,
+        rec_num: u64,
+        stream: Option<&str>,
+        max_bytes: u64,
+    ) -> Result<Vec<u8>> {
         let record = self.read_record(rec_num)?;
         // Gather the base record and any extension records the file's attributes
         // are spread across (via $ATTRIBUTE_LIST), then find the $DATA wherever
@@ -229,8 +271,10 @@ impl<R: Read + Seek> NtfsFs<R> {
         }
 
         if let Some((idx, attr)) = resident {
-            let mut value =
-                read_attribute_value(&mut self.reader, &records[idx], &attr, cluster_size)?;
+            let mut value = {
+                let mut reader = self.lock_reader();
+                read_attribute_value(&mut *reader, &records[idx], &attr, cluster_size)?
+            };
             if (value.len() as u64) > max_bytes {
                 value.truncate(max_bytes as usize); // max_bytes < len ⇒ fits usize
             }
@@ -238,8 +282,8 @@ impl<R: Read + Seek> NtfsFs<R> {
         }
         if fragments.is_empty() {
             return Err(match stream {
-                Some(s) => NtfsError::NotFound(format!("{path}:{s}")),
-                None => NtfsError::NotFound(format!("{path}::$DATA")),
+                Some(s) => NtfsError::NotFound(format!("record {rec_num}:{s}")),
+                None => NtfsError::NotFound(format!("record {rec_num}::$DATA")),
             });
         }
 
@@ -254,8 +298,9 @@ impl<R: Read + Seek> NtfsFs<R> {
         // The compression flag + unit live on the `$DATA` attribute (identical
         // across fragments); dispatch through the shared non-resident reader so a
         // compressed file is LZNT1-decompressed, not returned as raw bytes.
+        let mut reader = self.lock_reader();
         crate::data::read_nonresident_capped(
-            &mut self.reader,
+            &mut *reader,
             &runs,
             cluster_size,
             real_size,
@@ -264,11 +309,58 @@ impl<R: Read + Seek> NtfsFs<R> {
         )
     }
 
+    /// The assembled image runs of the `$DATA` stream named `stream` (or the
+    /// unnamed/default stream when `None`) of MFT record `rec_num`, in VCN order.
+    ///
+    /// For the forensic-vfs `FileSystem::extents` contract: a **resident** stream
+    /// exists but occupies no image runs (its bytes are inline in the record), so
+    /// this returns an empty `Vec`; a **non-resident** stream returns its runlist,
+    /// reassembled across `$ATTRIBUTE_LIST` fragments. Distinct from a *missing*
+    /// stream, which is [`NtfsError::NotFound`].
+    ///
+    /// # Errors
+    ///
+    /// [`NtfsError::NotFound`] if the record has no `$DATA` named `stream`, plus
+    /// record / runlist errors.
+    pub fn runs_by_record(&self, rec_num: u64, stream: Option<&str>) -> Result<Vec<Run>> {
+        let record = self.read_record(rec_num)?;
+        let records = self.gather_records(rec_num, &record)?;
+
+        let mut found = false;
+        // (start_vcn, record index, attribute) per non-resident fragment.
+        let mut fragments: Vec<(u64, usize, Attribute)> = Vec::new();
+        for (idx, rec_bytes) in records.iter().enumerate() {
+            for attr in record_attributes(rec_bytes)? {
+                if attr.type_code != attr_types::DATA || attr.name.as_deref() != stream {
+                    continue;
+                }
+                found = true;
+                if let AttributeBody::NonResident { start_vcn, .. } = &attr.body {
+                    fragments.push((*start_vcn, idx, attr));
+                }
+            }
+        }
+
+        if !found {
+            return Err(match stream {
+                Some(s) => NtfsError::NotFound(format!("record {rec_num}:{s}")),
+                None => NtfsError::NotFound(format!("record {rec_num}::$DATA")),
+            });
+        }
+
+        fragments.sort_by_key(|(start_vcn, _, _)| *start_vcn);
+        let mut runs = Vec::new();
+        for (_, idx, attr) in &fragments {
+            runs.extend(crate::data::attribute_runlist(&records[*idx], attr)?);
+        }
+        Ok(runs)
+    }
+
     /// The base record plus every distinct extension record referenced by its
     /// `$ATTRIBUTE_LIST` (if any) — so a fragmented file's attributes can be
     /// found wherever the MFT spread them. Cycles are broken by tracking seen
     /// record numbers.
-    fn gather_records(&mut self, base_num: u64, base_record: &[u8]) -> Result<Vec<Vec<u8>>> {
+    fn gather_records(&self, base_num: u64, base_record: &[u8]) -> Result<Vec<Vec<u8>>> {
         let base_attrs = record_attributes(base_record)?;
         let mut records = vec![base_record.to_vec()];
 
@@ -276,8 +368,13 @@ impl<R: Read + Seek> NtfsFs<R> {
             .iter()
             .find(|a| a.type_code == attr_types::ATTRIBUTE_LIST)
         {
-            let content =
-                read_attribute_value(&mut self.reader, base_record, al, self.boot.cluster_size())?;
+            // Read the $ATTRIBUTE_LIST content in a short locked scope, then
+            // release before the read_record loop below (which re-locks per
+            // call) so the non-reentrant Mutex cannot deadlock.
+            let content = {
+                let mut reader = self.lock_reader();
+                read_attribute_value(&mut *reader, base_record, al, self.boot.cluster_size())?
+            };
             let entries = crate::attribute_list::parse(&content)?;
             let mut seen = std::collections::BTreeSet::new();
             seen.insert(base_num);
@@ -842,7 +939,7 @@ mod tests {
         // reachable once record 0's $ATTRIBUTE_LIST is followed and BOTH of
         // record 4's $DATA fragments are assembled. Before the fix this fails
         // with "read past end of runs".
-        let mut fs = NtfsFs::open(build_volume_split_mft()).unwrap();
+        let fs = NtfsFs::open(build_volume_split_mft()).unwrap();
         for n in [8u64, 12, 15] {
             let rec = fs.read_record(n).unwrap();
             assert_eq!(&rec[0..4], b"FILE");
@@ -865,7 +962,7 @@ mod tests {
 
     #[test]
     fn reads_mft_record_by_number() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         let rec6 = fs.read_record(6).unwrap();
         assert_eq!(&rec6[0..4], b"FILE");
         let header = MftRecordHeader::parse(&rec6).unwrap();
@@ -879,7 +976,7 @@ mod tests {
 
     #[test]
     fn lists_directory_entries() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         let root = fs.read_record(mft_records::ROOT).unwrap();
         let entries = fs.directory_entries(&root).unwrap();
         assert!(entries
@@ -889,22 +986,101 @@ mod tests {
 
     #[test]
     fn resolves_path_to_record() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.resolve_path("\\test.txt").unwrap(), 6);
         assert_eq!(fs.resolve_path("/test.txt").unwrap(), 6);
     }
 
     #[test]
     fn read_file_returns_contents() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
         // read_file reads only the unnamed stream, not the ADS.
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
     }
 
+    /// The reader must serve reads through a shared `&self` so N workers share
+    /// one parsed MFT (no per-thread re-parse) — the enabler for the forensic-vfs
+    /// `FileSystem` trait, whose reads are all `&self`. Fails to compile until
+    /// every read method takes `&self` and `NtfsFs` is `Sync`.
+    #[test]
+    fn reads_through_shared_ref_across_threads() {
+        let fs = NtfsFs::open(build_volume()).unwrap(); // non-mut binding
+        std::thread::scope(|s| {
+            let fs = &fs; // requires NtfsFs: Sync
+            for _ in 0..8 {
+                s.spawn(move || {
+                    // &self reads shared across threads — no &mut, no re-open.
+                    let rec = fs.read_record(6).unwrap();
+                    assert_eq!(&rec[0..4], b"FILE");
+                    assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
+                });
+            }
+        });
+    }
+
+    #[test]
+    fn read_data_by_record_reads_default_and_named_streams() {
+        // The FileId-addressed read: the forensic-vfs FileSystem trait addresses
+        // nodes by MFT record, not path. Must match the path-based read_file.
+        let fs = NtfsFs::open(build_volume()).unwrap();
+        // record 6 = test.txt: default $DATA and a named ADS.
+        assert_eq!(
+            fs.read_data_by_record(6, None, u64::MAX).unwrap(),
+            b"hello world"
+        );
+        assert_eq!(
+            fs.read_data_by_record(6, Some("Zone.Identifier"), u64::MAX)
+                .unwrap(),
+            b"[ZoneTransfer]"
+        );
+        // record 9 = frag.txt: $DATA lives in an extension record — resolved by
+        // record number via $ATTRIBUTE_LIST, exactly like the path read.
+        assert_eq!(
+            fs.read_data_by_record(9, None, u64::MAX).unwrap(),
+            b"fragmented!"
+        );
+        // The byte cap is honoured mid-read.
+        assert_eq!(fs.read_data_by_record(6, None, 5).unwrap(), b"hello");
+        // A missing named stream is NotFound, naming the record.
+        assert!(matches!(
+            fs.read_data_by_record(6, Some("NoSuchStream"), u64::MAX),
+            Err(NtfsError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn runs_by_record_returns_nonresident_runlist() {
+        // For FileSystem::extents: the assembled image runs of a data stream.
+        let fs = NtfsFs::open(build_volume()).unwrap();
+        // split.bin (record 7): non-resident $DATA across two clusters (LCN 26,27).
+        let runs = fs.runs_by_record(7, None).unwrap();
+        let total: u64 = runs.iter().map(|r| r.length).sum();
+        assert_eq!(total, 2, "split.bin spans two clusters");
+        assert_eq!(
+            runs.iter().filter_map(|r| r.lcn).collect::<Vec<_>>(),
+            vec![26, 27]
+        );
+        // A resident stream exists but has no image runs (bytes are inline).
+        assert!(
+            fs.runs_by_record(6, None).unwrap().is_empty(),
+            "resident $DATA has no runs"
+        );
+        // No such stream → NotFound (named and default arms).
+        assert!(matches!(
+            fs.runs_by_record(6, Some("NoSuchStream")),
+            Err(NtfsError::NotFound(_))
+        ));
+        // record 5 = root dir: no $DATA at all → default-stream NotFound arm.
+        assert!(matches!(
+            fs.runs_by_record(mft_records::ROOT, None),
+            Err(NtfsError::NotFound(_))
+        ));
+    }
+
     #[test]
     fn read_named_stream_returns_ads_contents() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(
             fs.read_named_stream("\\test.txt", "Zone.Identifier")
                 .unwrap(),
@@ -914,7 +1090,7 @@ mod tests {
 
     #[test]
     fn read_named_stream_missing_is_not_found() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(
             fs.read_named_stream("\\test.txt", "NoSuchStream"),
             Err(NtfsError::NotFound(_))
@@ -924,7 +1100,7 @@ mod tests {
     #[test]
     fn read_file_on_directory_has_no_data_stream() {
         // The root directory has no unnamed $DATA.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(fs.read_file("\\"), Err(NtfsError::NotFound(_))));
     }
 
@@ -932,7 +1108,7 @@ mod tests {
     fn read_file_follows_attribute_list_to_extension_record() {
         // frag.txt's $DATA is not in its base record — it lives in extension
         // record 10, reachable only via $ATTRIBUTE_LIST.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.read_file("\\frag.txt").unwrap(), b"fragmented!");
     }
 
@@ -940,7 +1116,7 @@ mod tests {
     fn read_file_assembles_split_nonresident_data() {
         // split.bin's runlist is split across two $DATA attributes (VCN 0 and 1)
         // in different records — they must be concatenated in VCN order.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         let data = fs.read_file("\\split.bin").unwrap();
         assert_eq!(data.len(), 1024);
         assert!(data[..512].iter().all(|&b| b == b'A'));
@@ -952,12 +1128,12 @@ mod tests {
         // split.bin is a multi-cluster non-resident file: 512 'A' + 512 'B'. A
         // cap below its real size must stop materialising mid-stream and return a
         // true prefix of the full read, not zeroes or garbage.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         let full = fs.read_file("\\split.bin").unwrap();
         assert_eq!(full.len(), 1024);
 
         let cap = 600usize; // crosses the cluster boundary at 512
-        let mut fs2 = NtfsFs::open(build_volume()).unwrap();
+        let fs2 = NtfsFs::open(build_volume()).unwrap();
         let capped = fs2.read_file_capped("\\split.bin", cap).unwrap();
         assert!(capped.len() <= cap, "capped read must not exceed the cap");
         assert_eq!(capped.len(), cap);
@@ -967,10 +1143,10 @@ mod tests {
     #[test]
     fn read_file_capped_truncates_resident_stream() {
         // A resident $DATA is tiny, but the capped API must still honour the cap.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(fs.read_file_capped("\\test.txt", 5).unwrap(), b"hello");
         // A cap at or above the real size returns the whole stream unchanged.
-        let mut fs2 = NtfsFs::open(build_volume()).unwrap();
+        let fs2 = NtfsFs::open(build_volume()).unwrap();
         assert_eq!(
             fs2.read_file_capped("\\test.txt", 100).unwrap(),
             b"hello world"
@@ -979,7 +1155,7 @@ mod tests {
 
     #[test]
     fn missing_path_is_not_found() {
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(
             fs.read_file("\\nope.txt"),
             Err(NtfsError::NotFound(_))
@@ -1000,7 +1176,7 @@ mod tests {
         use std::fs::File;
         let bytes = build_volume().into_inner();
         let path = write_temp(&bytes, "file");
-        let mut fs = NtfsFs::open(File::open(&path).unwrap()).unwrap();
+        let fs = NtfsFs::open(File::open(&path).unwrap()).unwrap();
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
         std::fs::remove_file(&path).ok();
     }
@@ -1017,7 +1193,7 @@ mod tests {
         let path = write_temp(&disk, "offset");
         let part =
             OffsetReader::new(File::open(&path).unwrap(), pad as u64, bytes.len() as u64).unwrap();
-        let mut fs = NtfsFs::open(part).unwrap();
+        let fs = NtfsFs::open(part).unwrap();
         assert_eq!(fs.read_file("\\test.txt").unwrap(), b"hello world");
         std::fs::remove_file(&path).ok();
     }
@@ -1111,7 +1287,7 @@ mod tests {
     #[test]
     fn read_record_rejects_number_past_mft() {
         // Record 11 lies just past the 11-record synthetic MFT.
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(fs.read_record(11), Err(NtfsError::BadRunlist(_))));
     }
 
@@ -1120,7 +1296,7 @@ mod tests {
         // is_large is set but there is no $INDEX_ALLOCATION; the scan is skipped.
         let attrs = index_root_large(&[index_entry(9, "only.txt"), index_end()]);
         let rec = build_record(0x0003, &attrs);
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         let entries = fs.directory_entries(&rec).unwrap();
         assert!(entries
             .iter()
@@ -1216,7 +1392,7 @@ mod tests {
         let io = indx_lcn as usize * CLUSTER;
         vol[io..io + indx.len()].copy_from_slice(&indx);
 
-        let mut fs = NtfsFs::open(Cursor::new(vol)).unwrap();
+        let fs = NtfsFs::open(Cursor::new(vol)).unwrap();
         let root = fs.read_record(mft_records::ROOT).unwrap();
         let entries = fs.directory_entries(&root).unwrap();
         assert!(entries
@@ -1227,7 +1403,7 @@ mod tests {
     #[test]
     fn directory_without_index_root_is_not_a_directory() {
         let rec = build_record(0x0001, &resident_data(b"x"));
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(matches!(
             fs.directory_entries(&rec),
             Err(NtfsError::NotADirectory(_))
@@ -1240,7 +1416,7 @@ mod tests {
         let mut vol = build_volume().into_inner();
         let rec6_tail = MFT_LCN as usize * CLUSTER + 6 * REC + 1022;
         vol[rec6_tail] ^= 0xFF;
-        let mut fs = NtfsFs::open(Cursor::new(vol)).unwrap();
+        let fs = NtfsFs::open(Cursor::new(vol)).unwrap();
         assert!(matches!(
             fs.read_record(6),
             Err(NtfsError::FixupMismatch { .. })
@@ -1254,7 +1430,7 @@ mod tests {
         let mut attrs = index_root_large(&[index_end()]);
         attrs.extend_from_slice(&index_allocation(&alloc_runs, CLUSTER as u64));
         let rec = build_record(0x0003, &attrs);
-        let mut fs = NtfsFs::open(build_volume()).unwrap();
+        let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(fs.directory_entries(&rec).is_err());
     }
 }

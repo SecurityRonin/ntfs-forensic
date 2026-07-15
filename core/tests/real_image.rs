@@ -66,7 +66,7 @@ fn opens_raw_partition_image() {
         Ok(p) => p,
         Err(_) => return,
     };
-    let mut fs = NtfsFs::open(File::open(&path).expect("open image")).expect("parse NTFS volume");
+    let fs = NtfsFs::open(File::open(&path).expect("open image")).expect("parse NTFS volume");
 
     // Record 0 is $MFT itself and must be an in-use base record.
     let mft = fs.read_record(0).expect("read $MFT record");
