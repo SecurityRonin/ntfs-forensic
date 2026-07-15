@@ -5,6 +5,7 @@
 //! Handles overlapping and corrupt regions gracefully.
 
 use crate::usn::{parse_usn_record_v2, parse_usn_record_v3, UsnRecord};
+use forensic_bytes::{le_u16, le_u32};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -79,8 +80,8 @@ pub fn carve_usn_records(data: &[u8]) -> (Vec<CarvedRecord>, CarvingStats) {
             continue;
         }
 
-        let record_len = read_u32_le(data, offset) as usize;
-        let major_version = read_u16_le(data, offset + 4);
+        let record_len = le_u32(data, offset) as usize;
+        let major_version = le_u16(data, offset + 4);
 
         // Check if this could be a valid USN record
         match major_version {
@@ -132,8 +133,8 @@ fn try_carve_v2(
 
     let record_data = data.get(offset..offset + record_len)?;
 
-    let filename_length = read_u16_le(record_data, 0x38) as usize;
-    let filename_offset = read_u16_le(record_data, 0x3A) as usize;
+    let filename_length = le_u16(record_data, 0x38) as usize;
+    let filename_offset = le_u16(record_data, 0x3A) as usize;
 
     // Filename offset must be at 0x3C for V2
     if filename_offset != 0x3C {
@@ -183,8 +184,8 @@ fn try_carve_v3(
 
     let record_data = data.get(offset..offset + record_len)?;
 
-    let filename_length = read_u16_le(record_data, 0x48) as usize;
-    let filename_offset = read_u16_le(record_data, 0x4A) as usize;
+    let filename_length = le_u16(record_data, 0x48) as usize;
+    let filename_offset = le_u16(record_data, 0x4A) as usize;
 
     // Filename offset must be at 0x4C for V3
     if filename_offset != 0x4C {
@@ -223,24 +224,6 @@ fn is_valid_timestamp(filetime: i64) -> bool {
 }
 
 // ─── Binary helpers (bounds-checked, yield 0 on OOB) ─────────────────────────
-
-/// Reads a little-endian `u16` at `offset`, yielding 0 if out of bounds.
-fn read_u16_le(data: &[u8], offset: usize) -> u16 {
-    let mut b = [0u8; 2];
-    if let Some(s) = data.get(offset..offset + 2) {
-        b.copy_from_slice(s);
-    }
-    u16::from_le_bytes(b)
-}
-
-/// Reads a little-endian `u32` at `offset`, yielding 0 if out of bounds.
-fn read_u32_le(data: &[u8], offset: usize) -> u32 {
-    let mut b = [0u8; 4];
-    if let Some(s) = data.get(offset..offset + 4) {
-        b.copy_from_slice(s);
-    }
-    u32::from_le_bytes(b)
-}
 
 /// Reads a little-endian `i64` at `offset`, yielding 0 if out of bounds.
 fn read_i64_le(data: &[u8], offset: usize) -> i64 {
