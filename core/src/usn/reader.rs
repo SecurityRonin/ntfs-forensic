@@ -9,7 +9,7 @@ use std::io::{Read, Seek, SeekFrom};
 
 use crate::error::Result;
 use crate::usn::{parse_usn_record_v2, parse_usn_record_v3, UsnRecord};
-use forensic_bytes::{le_u16, le_u32};
+use safe_read::{le_u16, le_u32};
 
 const BUF_SIZE: usize = 64 * 1024; // 64KB read buffer
 

@@ -4,7 +4,7 @@
 //! at 1024-byte boundaries), validates each candidate, and extracts identity
 //! fields needed for path resolution via the Rewind engine.
 
-use forensic_bytes::{le_u16, le_u32, le_u64};
+use safe_read::{le_u16, le_u32, le_u64};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 

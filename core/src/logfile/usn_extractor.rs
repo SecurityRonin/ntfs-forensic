@@ -8,7 +8,7 @@
 //! Inspired by ntfs-linker's TriForce approach.
 
 use crate::usn::{parse_usn_record_v2, UsnRecord};
-use forensic_bytes::{le_u16, le_u32, le_u64};
+use safe_read::{le_u16, le_u32, le_u64};
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
