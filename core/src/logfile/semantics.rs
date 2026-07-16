@@ -1,7 +1,7 @@
 //! Semantic interpretation of `$LogFile` LFS records as file operations.
 //!
 //! [`parse_log_records`](super::parse_log_records) decodes the raw redo/undo
-//! [`LogOp`](super::LogOp) vocabulary; this layer maps each record's
+//! [`LogOp`] vocabulary; this layer maps each record's
 //! `(redo, undo)` operation pair to the higher-level **file operation** it
 //! effects — file creation, deletion, rename, data write, attribute change,
 //! index change, or transaction control.
