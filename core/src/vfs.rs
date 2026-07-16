@@ -148,7 +148,7 @@ fn build_meta(entry: u64, rec: &[u8]) -> VfsResult<FsMeta> {
 
 impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
     fn kind(&self) -> FsKind {
-        FsKind::Ntfs
+        FsKind::NTFS
     }
 
     fn root(&self) -> FileId {

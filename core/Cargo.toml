@@ -1,6 +1,6 @@
 [package]
 name = "ntfs-core"
-version = "0.9.0"
+version = "0.9.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -39,7 +39,7 @@ safe-read = { version = "0.1", path = "../../safe-read" }
 # Optional so a bare reader stays dependency-light; the `vfs` feature turns on
 # the `impl FileSystem for NtfsFs` adapter so an NTFS volume composes as
 # `Arc<dyn FileSystem>`.
-forensic-vfs = { version = "0.1", optional = true }
+forensic-vfs = { version = "0.3", optional = true }
 
 [features]
 # Adapt `NtfsFs` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`).

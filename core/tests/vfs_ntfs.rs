@@ -46,7 +46,7 @@ fn open_real_volume() -> Arc<dyn FileSystem> {
 #[test]
 fn identity_matches_tsk_geometry() {
     let fs = open_real_volume();
-    assert_eq!(fs.kind(), FsKind::Ntfs);
+    assert_eq!(fs.kind(), FsKind::NTFS);
     assert_eq!(fs.timestamp_zone(), TimeZonePolicy::Utc);
     // fsstat: sector 512, cluster 512.
     assert_eq!(

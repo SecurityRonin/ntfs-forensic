@@ -462,10 +462,12 @@ checksum = "d9c4f5dac5e15c24eb999c26181a6ca40b39fe946cbe4c263c7209467bc83af2"
 
 [[package]]
 name = "forensic-vfs"
-version = "0.1.0"
+version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0e1fd9ca5012d956da1cd418e2c40732f3e7d18638cd8705551e04fc7cc67030"
+checksum = "3cba259572a35ca7a2a71c2f2c7a225c9edcd57ddfbcc00b9ebaefebe4573891"
 dependencies = [
+ "forensicnomicon-core",
+ "state-history-forensic",
  "thiserror 2.0.18",
 ]
 
@@ -481,9 +483,9 @@ dependencies = [
 
 [[package]]
 name = "forensicnomicon-core"
-version = "1.0.0"
+version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5d5b96ffd37d1e758a1657839de8b4d5e7bfc024a5500509d07ff7acd7b9461"
+checksum = "b4ae8f9096cf3b0fb8414b1e419e7a8697902892082a9180cbd009d6afe87caa"
 
 [[package]]
 name = "forensicnomicon-data"
@@ -751,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "ntfs-core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "bitflags 2.13.0",
  "chrono",
@@ -1086,6 +1088,12 @@ name = "slab"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0c790de23124f9ab44544d7ac05d60440adc586479ce501c1d6d7da3cd8c9cf5"
+
+[[package]]
+name = "state-history-forensic"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06d95f05c0dd49a5dfae0eb6cb6fae7bb3bd5c1f787300c94a3a5adecb44d98f"
 
 [[package]]
 name = "strsim"
