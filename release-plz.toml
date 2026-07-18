@@ -1,0 +1,43 @@
+# release-plz owns crates.io publishing + changelogs + per-crate version bumps for
+# the workspace LIBRARIES — the reader `ntfs-core` and the analyzer `ntfs-forensic`.
+# It runs on pushes to main (see .github/workflows/release-plz.yml):
+#   - `release-pr`  opens a human-reviewed version-bump PR (conventional commits)
+#   - `release`     publishes any crate whose Cargo.toml version is ahead of
+#                   crates.io, in dependency order, and creates its git tag
+#
+# The `fuzz` crate is not a workspace member and is publish = false, so release-plz
+# never sees it.
+
+[workspace]
+# Per-package git tags, e.g. `ntfs-core-v0.9.3`, `ntfs-forensic-v0.8.1`. A
+# `<name>-v…` tag has a letter, not a digit, after the first `v`, so it never
+# matches a `v[0-9]*` binary-release trigger.
+git_tag_enable = true
+# Library crates get a git tag + CHANGELOG entry, not a separate GitHub Release.
+git_release_enable = false
+changelog_update = true
+# The reader (ntfs-core) and the analyzer (ntfs-forensic) version independently.
+dependencies_update = false
+# Only prepare a release when a real change exists since the last one. This
+# allowlist makes feat/fix/perf/refactor/doc/revert the only release triggers;
+# chore/ci/test/style/build (incl. release-plz's own release commits) never
+# prepare a release (kills the changelog-churn loop).
+release_commits = "^(feat|fix|perf|refactor|doc|revert)"
+
+[changelog]
+commit_parsers = [
+    { message = "^chore\\(release\\):", skip = true },
+    { message = "^chore: release", skip = true },
+    { message = "^feat", group = "added" },
+    { message = "^fix", group = "fixed" },
+    { message = "^perf", group = "performance" },
+    { message = "^refactor", group = "other" },
+    { message = "^doc", group = "documentation" },
+    { message = "^revert", group = "other" },
+    { message = "^style", skip = true },
+    { message = "^test", skip = true },
+    { message = "^ci", skip = true },
+    { message = "^build", skip = true },
+    { message = "^chore", skip = true },
+    { message = "^.*", group = "other" },
+]
