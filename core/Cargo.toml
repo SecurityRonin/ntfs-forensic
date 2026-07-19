@@ -39,7 +39,7 @@ safe-read = "0.1"
 # Optional so a bare reader stays dependency-light; the `vfs` feature turns on
 # the `impl FileSystem for NtfsFs` adapter so an NTFS volume composes as
 # `Arc<dyn FileSystem>`.
-forensic-vfs = { version = "0.4.3", optional = true }
+forensic-vfs = { version = "0.5", optional = true }
 
 [features]
 # Adapt `NtfsFs` to the forensic-vfs `FileSystem` trait (see `src/vfs.rs`).
