@@ -12,14 +12,16 @@
 use std::io::{Read, Seek};
 
 use forensic_vfs::{
-    Allocation, ByteRun, DirEntry, DirStream, ExtentStream, FileId, FileSystem, FsKind, FsMeta,
-    MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags, RunInfo, SectorSizes,
-    SmallHex, StreamId, TimeResolution, TimeSource, TimeStamp, TimeZonePolicy, VfsError, VfsResult,
+    Allocation, ByteRun, DeletedNode, DeletedStream, DirEntry, DirStream, ExtentStream, FileId,
+    FileSystem, FsKind, FsMeta, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags,
+    RunInfo, SectorSizes, SmallHex, StreamId, TimeResolution, TimeSource, TimeStamp,
+    TimeZonePolicy, VfsError, VfsResult,
 };
-use forensicnomicon::ntfs::{attr_types, mft_records};
+use forensicnomicon::ntfs::{attr_types, filename_namespace, mft_records};
 
 use crate::attribute::AttributeBody;
 use crate::error::NtfsError;
+use crate::file_name::FileName;
 use crate::fs::NtfsFs;
 use crate::parse_attributes;
 use crate::record::MftRecordHeader;
@@ -144,6 +146,45 @@ fn build_meta(entry: u64, rec: &[u8]) -> VfsResult<FsMeta> {
         residency,
         link_target: None,
     })
+}
+
+/// Namespace preference when a record carries several `$FILE_NAME` links: pick
+/// the human name over the 8.3 short name. Win32/DOS combined > Win32 > POSIX >
+/// DOS, so a DOS-only short name is used only when nothing better exists.
+fn namespace_rank(ns: u8) -> u8 {
+    match ns {
+        filename_namespace::WIN32_AND_DOS => 3,
+        filename_namespace::WIN32 => 2,
+        filename_namespace::POSIX => 1,
+        _ => 0, // DOS (or unknown): the least-preferred short name
+    }
+}
+
+/// The best `$FILE_NAME` for a record — the highest-ranked namespace among all
+/// name links (Win32 over 8.3 DOS). `None` when the record has no parseable
+/// `$FILE_NAME`, so the caller never fabricates a name.
+fn best_file_name(rec: &[u8]) -> Option<FileName> {
+    let header = MftRecordHeader::parse(rec).ok()?;
+    let attrs = parse_attributes(rec, header.first_attribute_offset as usize).ok()?;
+    attrs
+        .iter()
+        .filter(|a| a.type_code == attr_types::FILE_NAME)
+        .filter_map(|a| a.resident_content(rec))
+        .filter_map(|c| FileName::parse(c).ok())
+        .max_by_key(|fnm| namespace_rank(fnm.namespace))
+}
+
+/// Number of `$MFT` records = the unnamed `$DATA` real size / the record size.
+/// A record read past this bound is rejected by `read_record`, so the walk is
+/// bounded to the real MFT rather than scanning arbitrary image bytes.
+fn mft_record_count<R: Read + Seek + Send>(fs: &NtfsFs<R>) -> VfsResult<u64> {
+    let rec0 = fs.read_record(mft_records::MFT).map_err(map_err)?;
+    let meta = build_meta(mft_records::MFT, &rec0)?;
+    let rec_size = fs.boot().mft_record_size;
+    if rec_size == 0 {
+        return Ok(0); // cov:unreachable: a mounted volume always has a non-zero record size
+    }
+    Ok(meta.size / rec_size)
 }
 
 impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
@@ -280,9 +321,59 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
-        // MFT carving of deleted records is a follow-up; the default surface is
-        // an empty stream, not a bootstrap failure.
+        // The bare-`FsMeta` surface stays empty; the rich identity-carrying
+        // surface is `deleted_nodes` below.
         Ok(NodeStream::empty())
+    }
+
+    /// Recover deleted MFT records: walk the `$MFT`, and for every record whose
+    /// header parses but whose `IN_USE` flag is clear, recover the file's name +
+    /// parent from `$FILE_NAME` and its MACB times from `$STANDARD_INFORMATION`.
+    /// A record with no parseable `$FILE_NAME` is skipped (no name to recover),
+    /// never fabricated. Only the recovered nodes are collected — a small subset
+    /// of the MFT, not the whole table — so the returned stream stays bounded.
+    fn deleted_nodes(&self) -> VfsResult<DeletedStream> {
+        let count = mft_record_count(self)?;
+        let mut out: Vec<VfsResult<DeletedNode>> = Vec::new();
+        for entry in 0..count {
+            // A per-record read/parse miss is not a bootstrap failure: an
+            // unused/zeroed record fails the FILE-signature check and is skipped.
+            let Ok(rec) = self.read_record(entry) else {
+                continue;
+            };
+            let Ok(header) = MftRecordHeader::parse(&rec) else {
+                continue;
+            };
+            if header.is_in_use() {
+                continue;
+            }
+            let Some(fnm) = best_file_name(&rec) else {
+                continue; // no $FILE_NAME → nothing to recover, do not fabricate
+            };
+            let Ok(meta) = build_meta(entry, &rec) else {
+                continue;
+            };
+            // Parent record 0 ($MFT self) is never a real directory: treat it as
+            // an orphan (unrecoverable parent) rather than a bogus reference.
+            let parent = if fnm.parent.record_number == 0 {
+                None
+            } else {
+                Some(FileId::NtfsRef {
+                    entry: fnm.parent.record_number,
+                    seq: fnm.parent.sequence,
+                })
+            };
+            out.push(Ok(DeletedNode {
+                id: FileId::NtfsRef {
+                    entry,
+                    seq: header.sequence_number,
+                },
+                name: fnm.name.into_bytes(),
+                parent,
+                meta,
+            }));
+        }
+        Ok(DeletedStream::new(out.into_iter()))
     }
 
     fn unallocated(&self) -> VfsResult<ExtentStream> {
