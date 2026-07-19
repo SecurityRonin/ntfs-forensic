@@ -20,7 +20,8 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use forensic_vfs::{
-    FileId, FileSystem, FsKind, NodeKind, ResidencyKind, SectorSizes, StreamId, TimeZonePolicy,
+    Allocation, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, SectorSizes, StreamId,
+    TimeZonePolicy,
 };
 use ntfs_core::NtfsFs;
 
@@ -140,6 +141,88 @@ fn read_at_returns_file_bytes() {
     assert_eq!(
         fs.read_at(id, StreamId::Default, 10_000, &mut buf).unwrap(),
         0
+    );
+}
+
+/// The committed volume with MFT record 32 (`file8.txt`) marked deleted exactly
+/// as NTFS does it: the record-header IN_USE flag (bit `0x0001` of the `flags`
+/// field at record offset `0x16`) cleared, while its `$STANDARD_INFORMATION` and
+/// `$FILE_NAME` bytes stay intact. That is a genuine deleted MFT record — not a
+/// mock — so `deleted_nodes()` recovers the file's real name, parent, and MACB
+/// times. (Record 32 is located by its self-identifying header record-number
+/// field at offset `0x2C`; only the true record 32 carries that number — the
+/// `$MFTMirr` mirrors records 0-3 only and index buffers use the `INDX`
+/// signature — so the scan is unambiguous and survives fixture drift.)
+fn open_with_deleted_file8() -> Arc<dyn FileSystem> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(SAMPLE_ZIP)).expect("open sample zip");
+    let mut dd = Vec::new();
+    archive
+        .by_name("SampleTinyNtfsVolume/partition.dd")
+        .expect("partition.dd present")
+        .read_to_end(&mut dd)
+        .expect("read partition.dd");
+
+    let mut rec_off = None;
+    let mut off = 0usize;
+    while off + 0x30 <= dd.len() {
+        if &dd[off..off + 4] == b"FILE" {
+            let recnum = u32::from_le_bytes([
+                dd[off + 0x2c],
+                dd[off + 0x2d],
+                dd[off + 0x2e],
+                dd[off + 0x2f],
+            ]);
+            if recnum == 32 {
+                rec_off = Some(off);
+                break;
+            }
+        }
+        off += 512;
+    }
+    let rec_off = rec_off.expect("MFT record 32 (file8.txt) present in sample volume");
+
+    // The record must start allocated, or the "deletion" would be a no-op.
+    let flags_lo = rec_off + 0x16;
+    assert_eq!(
+        dd[flags_lo] & 0x01,
+        0x01,
+        "record 32 must be in-use before deletion"
+    );
+    dd[flags_lo] &= !0x01; // clear IN_USE — the exact bit NTFS flips on delete
+
+    let fs = NtfsFs::open(Cursor::new(dd)).expect("open NTFS volume");
+    Arc::new(fs)
+}
+
+#[test]
+fn deleted_nodes_recovers_deleted_file_name_and_parent() {
+    let fs = open_with_deleted_file8();
+    let deleted: Vec<_> = fs.deleted_nodes().unwrap().map(Result::unwrap).collect();
+
+    let node = deleted
+        .iter()
+        .find(|d| d.name == b"file8.txt")
+        .expect("deleted_nodes must recover file8.txt");
+
+    // Identity: MFT record 32, sequence 3 — a readable FileId::NtfsRef.
+    assert_eq!(node.id, FileId::NtfsRef { entry: 32, seq: 3 });
+    // Parent is the NTFS root directory (record 5, sequence 5).
+    assert_eq!(node.parent, Some(FileId::NtfsRef { entry: 5, seq: 5 }));
+    // Name-layer status is Deleted; it is a regular file.
+    assert_eq!(node.meta.allocated, Allocation::Deleted);
+    assert_eq!(node.meta.kind, NodeKind::File);
+    // MACB times survive the delete ($SI-sourced).
+    assert!(
+        node.meta.times.born.is_some(),
+        "born time recovered from $SI"
+    );
+
+    // The recovered id is genuinely readable — its resident $DATA reads back.
+    let mut buf = [0u8; 512];
+    let n = fs.read_at(node.id, StreamId::Default, 0, &mut buf).unwrap();
+    assert!(
+        n > 0,
+        "deleted file8.txt $DATA is readable via its recovered id"
     );
 }
 
