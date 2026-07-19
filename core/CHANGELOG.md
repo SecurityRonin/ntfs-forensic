@@ -4,6 +4,12 @@ All notable changes to `ntfs-core` (the reader) are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.4](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.3...ntfs-core-v0.9.4) - 2026-07-19
+
+### Fixed
+
+- *(deps)* bump forensic-vfs 0.4.3 -> 0.5
+
 ## [0.9.3](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.2...ntfs-core-v0.9.3) - 2026-07-19
 
 ### Added
