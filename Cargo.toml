@@ -28,6 +28,11 @@ chrono = "0.4"
 regex = "1"
 mft = "0.6"
 
+# Dev-only bridge: build against the unpublished forensic-vfs `deleted_nodes()`
+# (branch feat/deleted-nodes). Removed by the lead once forensic-vfs is published.
+[patch.crates-io]
+forensic-vfs = { path = "../forensic-vfs/crates/core" }
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 
