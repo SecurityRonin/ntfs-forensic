@@ -145,7 +145,7 @@ fn read_at_returns_file_bytes() {
 }
 
 /// The committed volume with MFT record 32 (`file8.txt`) marked deleted exactly
-/// as NTFS does it: the record-header IN_USE flag (bit `0x0001` of the `flags`
+/// as NTFS does it: the record-header `IN_USE` flag (bit `0x0001` of the `flags`
 /// field at record offset `0x16`) cleared, while its `$STANDARD_INFORMATION` and
 /// `$FILE_NAME` bytes stay intact. That is a genuine deleted MFT record — not a
 /// mock — so `deleted_nodes()` recovers the file's real name, parent, and MACB

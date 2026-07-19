@@ -59,6 +59,12 @@ the primary `$LogFile` test data is the real DC01 stream (§A1/§A3c image), TSK
 - **Author / source:** [jschicht/LogFileParser](https://github.com/jschicht/LogFileParser),
   bundled in `LogFileParser_v2.0.0.53.zip`
   (<https://github.com/jschicht/LogFileParser/releases/download/v2.0.0.53/LogFileParser_v2.0.0.53.zip>).
+- **Also used by** `core/tests/vfs_ntfs.rs` (`deleted_nodes` test): the extracted `partition.dd`
+  is loaded into memory and MFT record 32 (`file8.txt`) is marked deleted **exactly as NTFS
+  does it** — the record-header IN_USE flag (bit `0x0001` at record offset `0x16`) is cleared,
+  leaving `$STANDARD_INFORMATION`/`$FILE_NAME` intact. That yields a genuine deleted MFT record
+  (a real on-disk delete, not a mock) whose recovered name/parent/times the test asserts. No
+  new committed bytes; the mutation is in-test only.
 - **Redistribution / license:** LogFileParser is **MIT** (`LICENSE.md`, SPDX `MIT`, verified via
   `gh api repos/jschicht/LogFileParser`), which permits redistribution with attribution — so this
   bundled sample is committed. Attribution: © Joakim Schicht, MIT.
