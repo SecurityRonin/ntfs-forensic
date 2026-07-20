@@ -220,6 +220,35 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         TimeZonePolicy::Utc
     }
 
+    /// The NTFS volume label from the `$Volume` metafile (MFT record 3): its
+    /// `$VOLUME_NAME` attribute (type `0x60`) is resident and holds the label in
+    /// UTF-16LE. `None` when `$Volume`/the attribute is absent or the label is
+    /// empty — never a fabricated name. A per-record read/parse miss degrades to
+    /// `None` (a missing label is not a bootstrap failure).
+    fn volume_label(&self) -> Option<String> {
+        let rec = self.read_record(mft_records::VOLUME).ok()?;
+        let header = MftRecordHeader::parse(&rec).ok()?;
+        let attrs = parse_attributes(&rec, header.first_attribute_offset as usize).ok()?;
+        let content = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::VOLUME_NAME)
+            .and_then(|a| a.resident_content(&rec))?;
+        // $VOLUME_NAME is UTF-16LE; an odd trailing byte cannot form a code unit
+        // and is dropped by `chunks_exact`.
+        let units: Vec<u16> = content
+            .chunks_exact(2)
+            .map(|c| u16::from_le_bytes([c[0], c[1]]))
+            .collect();
+        let label: String = char::decode_utf16(units)
+            .map(|r| r.unwrap_or('\u{FFFD}'))
+            .collect();
+        if label.is_empty() {
+            None
+        } else {
+            Some(label)
+        }
+    }
+
     fn read_dir(&self, ino: FileId) -> VfsResult<DirStream> {
         let entry = entry_of(ino)?;
         let rec = self.read_record(entry).map_err(map_err)?;
