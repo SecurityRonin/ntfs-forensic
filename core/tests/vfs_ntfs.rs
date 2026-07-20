@@ -63,6 +63,15 @@ fn identity_matches_tsk_geometry() {
 }
 
 #[test]
+fn volume_label_matches_tsk() {
+    // TSK `fsstat -f ntfs partition.dd` reports `Volume Name: New Volume` —
+    // the $VOLUME_NAME attribute of the $Volume metafile (MFT record 3),
+    // stored UTF-16LE. The tool is the oracle, not our own reader.
+    let fs = open_real_volume();
+    assert_eq!(fs.volume_label(), Some("New Volume".to_string()));
+}
+
+#[test]
 fn read_dir_lists_real_root_entries() {
     let fs = open_real_volume();
     let entries: Vec<_> = fs
