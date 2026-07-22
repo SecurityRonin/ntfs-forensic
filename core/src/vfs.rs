@@ -187,6 +187,65 @@ fn mft_record_count<R: Read + Seek + Send>(fs: &NtfsFs<R>) -> VfsResult<u64> {
     Ok(meta.size / rec_size)
 }
 
+/// Maximal runs of free (unallocated) clusters in an NTFS `$Bitmap`.
+///
+/// `$Bitmap` stores one bit per cluster, **LSB-first** within each byte: a set
+/// bit marks the cluster allocated, a clear bit marks it free. Bits past
+/// `total_clusters` are padding in the final byte (the bitmap length is rounded
+/// up to a whole byte) and are ignored — the `total_clusters` bound is
+/// authoritative, so a crafted padding bit cannot invent or hide a cluster.
+///
+/// Each maximal span of free clusters is returned as `(start_cluster, length)`.
+/// A byte the bitmap does not contain (a short/truncated bitmap) reads as
+/// **allocated**, so free space is never fabricated past the described data; the
+/// caller (`unallocated`) separately rejects a bitmap too short to cover the
+/// volume, so that arm is a defensive floor, not the normal path.
+fn free_runs(bitmap: &[u8], total_clusters: u64) -> Vec<(u64, u64)> {
+    let mut runs: Vec<(u64, u64)> = Vec::new();
+    let mut run_start: Option<u64> = None;
+    for cluster in 0..total_clusters {
+        let byte_idx = usize::try_from(cluster / 8).unwrap_or(usize::MAX);
+        let bit = (cluster % 8) as u8;
+        let allocated = bitmap.get(byte_idx).is_none_or(|b| (b >> bit) & 1 == 1);
+        if allocated {
+            if let Some(start) = run_start.take() {
+                runs.push((start, cluster - start));
+            }
+        } else if run_start.is_none() {
+            run_start = Some(cluster);
+        }
+    }
+    if let Some(start) = run_start {
+        runs.push((start, total_clusters - start));
+    }
+    runs
+}
+
+/// Core of [`FileSystem::unallocated`]: map an NTFS `$Bitmap`'s free clusters to
+/// image-relative [`RunInfo`] extents. Factored out of the trait method so it is
+/// unit-tested directly over synthetic bitmap bytes; the method itself is the
+/// thin `$Bitmap`-reading wrapper. `base_offset` is added to every run so an
+/// extent addresses the enclosing image/partition (0 here, matching the
+/// volume-relative offsets [`FileSystem::extents`] reports).
+fn unallocated_runs(
+    bitmap: &[u8],
+    cluster_size: u64,
+    total_clusters: u64,
+    base_offset: u64,
+) -> Vec<RunInfo> {
+    free_runs(bitmap, total_clusters)
+        .into_iter()
+        .map(|(start, len)| RunInfo {
+            run: ByteRun {
+                image_offset: base_offset.saturating_add(start.saturating_mul(cluster_size)),
+                len: len.saturating_mul(cluster_size),
+                flags: RunFlags::default(),
+            },
+            alloc: RunAlloc::Unallocated,
+        })
+        .collect()
+}
+
 impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
     fn kind(&self) -> FsKind {
         FsKind::NTFS
@@ -405,8 +464,47 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         Ok(DeletedStream::new(out.into_iter()))
     }
 
+    /// Enumerate the volume's unallocated (free) clusters as image extents.
+    ///
+    /// Reads `$Bitmap` (MFT record 6) — the cluster allocation bitmap, 1 bit per
+    /// cluster — and emits each maximal run of free clusters as a
+    /// [`RunAlloc::Unallocated`] [`RunInfo`], byte offsets volume-relative (base
+    /// 0) to match [`extents`](FileSystem::extents). A `$Bitmap` too short to
+    /// describe every cluster fails **loud** ([`VfsError::Decode`]) rather than
+    /// silently reporting the volume as fully allocated.
     fn unallocated(&self) -> VfsResult<ExtentStream> {
-        Ok(ExtentStream::empty())
+        let boot = self.boot();
+        let cluster_size = boot.cluster_size();
+        let total_clusters = if boot.sectors_per_cluster == 0 {
+            0 // cov:unreachable: BootSector::parse rejects a zero sectors_per_cluster
+        } else {
+            boot.total_sectors / u64::from(boot.sectors_per_cluster)
+        };
+
+        // The whole bitmap is total_clusters/8 bytes — bounded and small (~32 MiB
+        // for a 1 TiB volume at 4 KiB clusters), so materialising it is safe.
+        let bitmap = self
+            .read_data_by_record(mft_records::BITMAP, None, u64::MAX)
+            .map_err(map_err)?;
+
+        // Fail loud on a truncated bitmap: it cannot describe the whole volume, so
+        // the missing bytes would masquerade as "all allocated" — a silent wrong
+        // answer. `div_ceil` rounds the bit count up to whole bytes.
+        let needed = usize::try_from(total_clusters.div_ceil(8)).unwrap_or(usize::MAX);
+        if bitmap.len() < needed {
+            return Err(VfsError::Decode {
+                layer: "ntfs $Bitmap",
+                offset: 0,
+                detail: format!(
+                    "$Bitmap is {} bytes but {total_clusters} clusters need {needed}",
+                    bitmap.len()
+                ),
+                bytes: SmallHex::new(&[]),
+            });
+        }
+
+        let runs = unallocated_runs(&bitmap, cluster_size, total_clusters, 0);
+        Ok(ExtentStream::new(runs.into_iter().map(Ok)))
     }
 }
 
@@ -471,7 +569,7 @@ mod tests {
     fn unallocated_runs_applies_base_offset() {
         // base_offset shifts every run into the enclosing image/partition.
         let base = 1_048_576u64;
-        let runs = unallocated_runs(&[0x00], 5, 4096, base);
+        let runs = unallocated_runs(&[0x00], 4096, 5, base);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].run.image_offset, base);
         assert_eq!(runs[0].run.len, 5 * 4096);
