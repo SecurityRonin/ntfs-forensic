@@ -236,6 +236,52 @@ fn deleted_nodes_recovers_deleted_file_name_and_parent() {
 }
 
 #[test]
+fn unallocated_reports_free_clusters_consistent_with_bitmap() {
+    // `unallocated()` reads the volume's real `$Bitmap` (MFT record 6) and emits
+    // each maximal run of free clusters. The independent cross-check (no external
+    // tool): the $MFT's own clusters are allocated, so none of them may appear in
+    // an unallocated run. We compare against the $MFT extent the reader reports
+    // for record 0 — a different code path — so agreement is not self-referential.
+    let fs = open_real_volume();
+
+    let free: Vec<_> = fs.unallocated().unwrap().map(Result::unwrap).collect();
+    assert!(
+        !free.is_empty(),
+        "a real volume with slack space has free clusters"
+    );
+
+    // Runs are ordered, non-empty, and non-overlapping (maximal spans).
+    let mut prev_end = 0u64;
+    for r in &free {
+        assert!(r.run.len > 0, "a free run is never zero-length");
+        assert!(
+            r.run.image_offset >= prev_end,
+            "free runs are ordered and disjoint"
+        );
+        prev_end = r.run.image_offset + r.run.len;
+    }
+
+    // No free run overlaps the (allocated) $MFT $DATA.
+    let mft: Vec<_> = fs
+        .extents(FileId::NtfsRef { entry: 0, seq: 1 }, StreamId::Default)
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    for m in &mft {
+        let m_start = m.run.image_offset;
+        let m_end = m_start + m.run.len;
+        for r in &free {
+            let r_start = r.run.image_offset;
+            let r_end = r_start + r.run.len;
+            assert!(
+                r_end <= m_start || r_start >= m_end,
+                "free run [{r_start},{r_end}) overlaps allocated $MFT [{m_start},{m_end})"
+            );
+        }
+    }
+}
+
+#[test]
 fn extents_returns_mft_runs() {
     let fs = open_real_volume();
     // $MFT (record 0): istat → $DATA Non-Resident, size 262144, first LCN 4778.

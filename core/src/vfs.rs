@@ -409,3 +409,71 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         Ok(ExtentStream::empty())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{free_runs, unallocated_runs};
+    use forensic_vfs::RunAlloc;
+
+    #[test]
+    fn free_runs_finds_maximal_zero_bit_runs() {
+        // Bits are LSB-first within each byte. 0xFF = clusters 0..=7 allocated;
+        // 0x00 = clusters 8..=15 free; 0x0F = clusters 16..=19 allocated (bits
+        // 0..=3 set), bits 4..=7 are padding past total=20 and ignored. So the
+        // only free span is clusters 8..=15.
+        assert_eq!(free_runs(&[0xFF, 0x00, 0x0F], 20), vec![(8, 8)]);
+    }
+
+    #[test]
+    fn free_runs_alternating_bits_yield_single_cluster_runs() {
+        // 0b1010_1010: bit0=0 (free), bit1=1 (alloc), … → clusters 0,2,4,6 free.
+        assert_eq!(
+            free_runs(&[0b1010_1010], 8),
+            vec![(0, 1), (2, 1), (4, 1), (6, 1)]
+        );
+    }
+
+    #[test]
+    fn free_runs_trailing_run_to_total_ignores_padding_bits() {
+        // 0x00 marks bits 0..=7 free, but total is 5 — bits 5..=7 are padding and
+        // must not extend the run. The run closes at the total-cluster boundary.
+        assert_eq!(free_runs(&[0x00], 5), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn free_runs_all_allocated_is_empty() {
+        assert!(free_runs(&[0xFF], 8).is_empty());
+    }
+
+    #[test]
+    fn free_runs_short_bitmap_does_not_fabricate_free_space() {
+        // A bitmap too short to cover total_clusters must not invent free clusters
+        // for the bytes it lacks — a missing byte reads as allocated.
+        assert!(free_runs(&[], 4).is_empty());
+        // Only the described first byte contributes; clusters 8..=11 (no byte) are
+        // treated as allocated, so the run stops at 8.
+        assert_eq!(free_runs(&[0x00], 12), vec![(0, 8)]);
+    }
+
+    #[test]
+    fn unallocated_runs_maps_free_clusters_to_image_offsets() {
+        // Free span clusters 8..=15 over 512-byte clusters, base offset 0 → one
+        // Unallocated run at byte 8*512 for 8*512 bytes.
+        let runs = unallocated_runs(&[0xFF, 0x00, 0x0F], 512, 20, 0);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run.image_offset, 8 * 512);
+        assert_eq!(runs[0].run.len, 8 * 512);
+        assert_eq!(runs[0].alloc, RunAlloc::Unallocated);
+        assert!(!runs[0].run.flags.sparse);
+    }
+
+    #[test]
+    fn unallocated_runs_applies_base_offset() {
+        // base_offset shifts every run into the enclosing image/partition.
+        let base = 1_048_576u64;
+        let runs = unallocated_runs(&[0x00], 5, 4096, base);
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].run.image_offset, base);
+        assert_eq!(runs[0].run.len, 5 * 4096);
+    }
+}
