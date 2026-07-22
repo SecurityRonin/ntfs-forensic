@@ -20,8 +20,8 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use forensic_vfs::{
-    Allocation, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, SectorSizes, StreamId,
-    TimeZonePolicy,
+    Allocation, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, RunAlloc, SectorSizes,
+    StreamId, TimeZonePolicy,
 };
 use ntfs_core::NtfsFs;
 
@@ -279,6 +279,72 @@ fn unallocated_reports_free_clusters_consistent_with_bitmap() {
             );
         }
     }
+}
+
+/// **Tier-1 (independent-oracle) validation of `unallocated()`.**
+///
+/// The Sleuth Kit is the oracle. On the committed sample volume:
+///
+/// ```text
+/// $ fsstat -f ntfs partition.dd
+///   Sector Size: 512
+///   Cluster Size: 512
+///   Total Cluster Range: 0 - 14334        # 14335 clusters total
+/// $ blkls   -f ntfs partition.dd | wc -c   # unallocated clusters, concatenated
+///   3503616                                # 3503616 / 512 = 6843 free clusters
+/// $ blkls -e -f ntfs partition.dd | wc -c  # every cluster (sanity)
+///   7339520                                # 7339520 / 512 = 14335 == total
+/// ```
+///
+/// `blkls` (default) extracts exactly the `$Bitmap`-unallocated clusters, so its
+/// byte count IS the free-space oracle: **6843 free clusters × 512 = 3 503 616
+/// bytes**. This test sums the `len` of every extent `unallocated()` emits and
+/// asserts it equals that number — reconciling our `$Bitmap` walk against TSK's,
+/// not against ourselves. It is env-gated (`NTFS_TIER1=1`) like the crate's other
+/// real-artifact checks so the default `cargo test` stays hermetic.
+#[test]
+fn unallocated_total_matches_tsk_blkls_free_clusters() {
+    if std::env::var("NTFS_TIER1").is_err() {
+        return; // Tier-1 oracle reconciliation — opt in with NTFS_TIER1=1.
+    }
+
+    // Independent ground truth from `blkls` (see doc comment above).
+    const CLUSTER_SIZE: u64 = 512;
+    const TSK_FREE_CLUSTERS: u64 = 6843;
+    const TSK_FREE_BYTES: u64 = TSK_FREE_CLUSTERS * CLUSTER_SIZE; // 3_503_616
+
+    let fs = open_real_volume();
+    let free: Vec<_> = fs.unallocated().unwrap().map(Result::unwrap).collect();
+    assert!(!free.is_empty(), "the volume has free clusters");
+
+    let mut total_free_bytes = 0u64;
+    for r in &free {
+        // Every extent is a genuine unallocated run …
+        assert_eq!(r.alloc, RunAlloc::Unallocated);
+        // … and cluster-aligned in both offset and length.
+        assert_eq!(
+            r.run.image_offset % CLUSTER_SIZE,
+            0,
+            "free run offset {} is cluster-aligned",
+            r.run.image_offset
+        );
+        assert_eq!(
+            r.run.len % CLUSTER_SIZE,
+            0,
+            "free run length {} is a whole number of clusters",
+            r.run.len
+        );
+        total_free_bytes += r.run.len;
+    }
+
+    // The reconciliation: our summed free space == TSK's free-cluster count × size.
+    assert_eq!(
+        total_free_bytes,
+        TSK_FREE_BYTES,
+        "sum of unallocated() extents ({total_free_bytes} B = {} clusters) must equal \
+         TSK blkls free space ({TSK_FREE_BYTES} B = {TSK_FREE_CLUSTERS} clusters)",
+        total_free_bytes / CLUSTER_SIZE
+    );
 }
 
 #[test]

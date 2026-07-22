@@ -83,6 +83,35 @@ compared. The gate fails on any flag disagreement, and validates that the
 oracle's chosen file name is *among* the names `ntfs-forensic` parsed (a record
 may carry Win32 / 8.3 / POSIX / hard-link names).
 
+### `unallocated()` free-cluster enumeration — Tier 1
+
+`core/tests/vfs_ntfs.rs::unallocated_total_matches_tsk_blkls_free_clusters`
+(env-gated, `NTFS_TIER1=1`) reconciles the VFS `unallocated()` `$Bitmap` walk
+against **The Sleuth Kit as an independent oracle** on the committed
+`SampleTinyNtfsVolume` (`partition.dd`). TSK derives free space from the same
+`$Bitmap` through an entirely separate code path:
+
+```text
+$ fsstat -f ntfs partition.dd
+  Sector Size: 512
+  Cluster Size: 512
+  Total Cluster Range: 0 - 14334          # 14335 clusters total
+$ blkls   -f ntfs partition.dd | wc -c    # unallocated clusters, concatenated
+  3503616                                 # 3503616 / 512 = 6843 free clusters
+$ blkls -e -f ntfs partition.dd | wc -c   # every cluster (sanity)
+  7339520                                 # 7339520 / 512 = 14335 == total
+```
+
+`blkls` (default) streams exactly the clusters `$Bitmap` marks free, so its byte
+count is the free-space oracle: **6843 free clusters × 512 B = 3 503 616 B**. The
+test sums the `len` of every extent `unallocated()` emits and asserts it equals
+that number; it also asserts each extent is cluster-aligned (offset and length)
+and carries `RunAlloc::Unallocated`. Our summed total is **3 503 616 B (6843
+clusters) — an exact match**, with no accounting difference: both readers ignore
+the padding bits past cluster 14334 in the final `$Bitmap` byte. Agreement across
+two independent `$Bitmap` decoders establishes correctness against real on-disk
+bytes rather than against our own fixtures.
+
 ### `$LogFile` RCRD record pages — Tier 1 input + Tier 2 completeness
 
 `core/tests/logfile_rcrd.rs` validates `read_record_pages` (the RCRD reader +
@@ -355,6 +384,10 @@ NTFS_FORENSIC_LOGFILE=DC01_LogFile.bin \
 # Full NTFS volume walk
 NTFS_FORENSIC_TEST_IMAGE=/path/to/ntfs.raw \
   cargo test -p ntfs-core --test real_image -- --ignored
+
+# unallocated() vs TSK blkls free-space oracle (committed sample volume)
+NTFS_TIER1=1 cargo test -p ntfs-core --features vfs --test vfs_ntfs \
+  unallocated_total_matches_tsk_blkls_free_clusters
 ```
 
 The `$LogFile` transaction oracle is LogFileParser (jschicht) run under Wine — it
