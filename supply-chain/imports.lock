@@ -22,6 +22,48 @@ user-id = 696
 user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
 
+[[publisher.forensic-vfs]]
+version = "0.7.0"
+when = "2026-07-20"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
+[[publisher.forensicnomicon]]
+version = "1.8.1"
+when = "2026-07-19"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
+[[publisher.forensicnomicon-core]]
+version = "1.4.0"
+when = "2026-07-19"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
+[[publisher.forensicnomicon-data]]
+version = "1.3.2"
+when = "2026-07-19"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
+[[publisher.safe-read]]
+version = "0.1.0"
+when = "2026-07-15"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
+[[publisher.state-history-forensic]]
+version = "0.1.0"
+when = "2026-06-16"
+user-id = 347968
+user-login = "h4x0r"
+user-name = "Albert Hui"
+
 [[publisher.unicode-width]]
 version = "0.2.2"
 when = "2025-10-06"
