@@ -6,167 +6,39 @@ on:
   pull_request:
     branches: [main]
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
+permissions:
+  contents: read
 
 jobs:
-  fmt:
-    name: Format
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - run: cargo fmt --check
+  # fmt · clippy · test (3 OS) · MSRV · cargo-deny · cargo-vet · secret scan ·
+  # fuzz build-check · per-line coverage gate.
+  #
+  # No overrides: MSRV derives from rust-version (1.85) and the root fuzz/ crate
+  # is discovered automatically.
+  #
+  # NOTE — this adopts the fleet coverage SCOPE, which is wider than what this
+  # repo measured before. The workflow being replaced ran `cargo llvm-cov --lib`
+  # with no features; the fleet default is `--workspace --all-features`. Running
+  # the gate locally at the fleet default surfaces 37 uncovered lines in
+  # core/src/vfs.rs — the `vfs` feature adapter, which the narrower scope never
+  # measured at all. The old job is named "Coverage (100% lines)" and the number
+  # was true for what it measured, and silent about a whole feature-gated module.
+  #
+  # Those 37 lines are left visible on purpose. The two honest ways to clear them
+  # are to test the vfs adapter, or to declare the exclusion explicitly with
+  # `coverage-ignore-regex: 'core/src/vfs\.rs'` — which is at least reviewable.
+  # Narrowing the scope back to --lib would hide the gap again.
+  ci:
+    uses: SecurityRonin/fleet-config/.github/workflows/rust-ci.yml@c30b7708f0e5900d40c0435eac02a15d0f72df75
 
-  clippy:
-    name: Clippy
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo clippy --all-targets -- -D warnings
-
-  test:
-    name: Test (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo test
-
-  msrv:
-    name: MSRV (1.85)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@1.85
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo build
-
-  coverage:
-    name: Coverage (100% lines)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: llvm-tools-preview
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
-        with:
-          tool: cargo-llvm-cov
-      # The library's I/O is generic over the reader, so each error closure is
-      # monomorphized per reader type — making cargo-llvm-cov's region/function
-      # metrics structurally < 100%. The meaningful, monomorphization-robust
-      # invariant is that every executable source line is hit at least once.
-      #
-      # Exception — panic-free defence in depth: a line carrying a
-      # `// cov:unreachable` marker is a defensive guard (a `let-else { continue }`,
-      # a bounds-checked `.get()` fallback, etc.) that is provably unreachable
-      # under a dominating invariant, kept deliberately to stay panic-free if that
-      # invariant is ever broken by a future change. Such lines cannot be exercised
-      # by any test and are exempt. The gate fails on any OTHER zero-hit line.
-      - name: Generate lcov
-        run: cargo llvm-cov --lcov --output-path lcov.info --ignore-filename-regex '(^|/)src/(main\.rs|bin/)'
-      - name: Enforce line coverage (unreachable defensive arms must carry // cov:unreachable)
-        shell: bash
-        run: |
-          fail=0
-          while IFS= read -r line; do
-            if [[ "$line" == SF:* ]]; then
-              f="${line#SF:}"
-            elif [[ "$line" =~ ^DA:([0-9]+),0$ ]]; then
-              n="${BASH_REMATCH[1]}"
-              src="$(sed -n "${n}p" "$f")"
-              if [[ "$src" == *cov:unreachable* ]]; then
-                echo "exempt (// cov:unreachable): $f:$n"
-              else
-                echo "::error::Uncovered line $f:$n:$src"
-                fail=1
-              fi
-            fi
-          done < lcov.info
-          if [[ "$fail" -ne 0 ]]; then exit 1; fi
-          echo "All executable lines covered, or annotated // cov:unreachable."
-
-  deny:
-    name: cargo-deny
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: EmbarkStudios/cargo-deny-action@bb137d7af7e4fb67e5f82a49c4fce4fad40782fe # v2.0.20
-        with:
-          command: check
-
-  vet:
-    name: Cargo Vet (supply-chain)
-    runs-on: ubuntu-latest
-    # Complements `deny` (known-bad advisories/licenses) with the supply-chain-
-    # injection layer: every dependency version must be human-source-reviewed or
-    # covered by an imported aggregate audit set (Google/Mozilla/Bytecode-Alliance/
-    # Embark). Config in supply-chain/{config,audits,imports}.toml.
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install cargo-vet
-        uses: taiki-e/install-action@59012be0884e296ca2da49b530610e72c49039ad # v2.81.6
-        with:
-          tool: cargo-vet
-      - name: Fetch dependencies
-        run: cargo fetch
-      - name: Check supply chain
-        run: cargo vet --locked
-
-  secrets:
-    name: Secret Scan (gitleaks)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          fetch-depth: 0
-      - name: Install gitleaks
-        run: |
-          VERSION=$(curl -s https://api.github.com/repos/gitleaks/gitleaks/releases/latest | jq -r '.tag_name[1:]')
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${VERSION}/gitleaks_${VERSION}_linux_x64.tar.gz" \
-            | tar xz -C /tmp gitleaks
-      - name: Run gitleaks
-        run: /tmp/gitleaks detect --source .
-
-  fuzz:
-    name: Fuzz targets (nightly)
-    runs-on: ubuntu-latest
-    # cargo-fuzz builds with the host nightly; warnings in its own deps must not
-    # fail the install, so this job does not deny warnings.
-    env:
-      RUSTFLAGS: ""
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@nightly
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
-      - run: cargo install cargo-fuzz
-      - name: Build all fuzz targets
-        run: cargo +nightly fuzz check
-      - name: Smoke-fuzz each target (30s)
-        run: |
-          for t in boot record attributes runlist index_buffer attribute_list; do
-            cargo +nightly fuzz run "$t" -- -max_total_time=30 -rss_limit_mb=4096
-          done
-
+  # Repo-specific, so it stays here rather than moving into the shared workflow.
   docs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@9bdad043e88c75890e36ad3bbc8d27f0090dd609 # v2.7.8
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
