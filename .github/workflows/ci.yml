@@ -29,16 +29,16 @@ jobs:
   # `coverage-ignore-regex: 'core/src/vfs\.rs'` — which is at least reviewable.
   # Narrowing the scope back to --lib would hide the gap again.
   ci:
-    uses: SecurityRonin/fleet-config/.github/workflows/rust-ci.yml@5bfd1026c31e82b6c0b192a091c82dc1a7e7ee39
+    uses: SecurityRonin/fleet-config/.github/workflows/rust-ci.yml@29389c094b9d2e95493d5f8857dd51d5407559a0
 
   # Repo-specific, so it stays here rather than moving into the shared workflow.
   docs:
     name: Docs
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
         with:
           toolchain: stable
-      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: Swatinem/rust-cache@9d47c6ad4b02e050fd481d890b2ea34778fd09d6 # v2.7.8
       - run: RUSTDOCFLAGS="-D warnings" cargo doc --no-deps
