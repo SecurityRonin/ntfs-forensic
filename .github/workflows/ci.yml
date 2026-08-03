@@ -77,7 +77,7 @@ jobs:
       # invariant is ever broken by a future change. Such lines cannot be exercised
       # by any test and are exempt. The gate fails on any OTHER zero-hit line.
       - name: Generate lcov
-        run: cargo llvm-cov --lib --lcov --output-path lcov.info
+        run: cargo llvm-cov --lcov --output-path lcov.info --ignore-filename-regex '(^|/)src/(main\.rs|bin/)'
       - name: Enforce line coverage (unreachable defensive arms must carry // cov:unreachable)
         shell: bash
         run: |
