@@ -16,20 +16,46 @@ jobs:
   # No overrides: MSRV derives from rust-version (1.85) and the root fuzz/ crate
   # is discovered automatically.
   #
-  # NOTE — this adopts the fleet coverage SCOPE, which is wider than what this
-  # repo measured before. The workflow being replaced ran `cargo llvm-cov --lib`
-  # with no features; the fleet default is `--workspace --all-features`. Running
-  # the gate locally at the fleet default surfaces 37 uncovered lines in
-  # core/src/vfs.rs — the `vfs` feature adapter, which the narrower scope never
-  # measured at all. The old job is named "Coverage (100% lines)" and the number
-  # was true for what it measured, and silent about a whole feature-gated module.
+  # COVERAGE — deliberately `floor`, not the fleet-standard `strict`. This is
+  # migration debt with a named end state, recorded here rather than hidden.
   #
-  # Those 37 lines are left visible on purpose. The two honest ways to clear them
-  # are to test the vfs adapter, or to declare the exclusion explicitly with
-  # `coverage-ignore-regex: 'core/src/vfs\.rs'` — which is at least reviewable.
-  # Narrowing the scope back to --lib would hide the gap again.
+  # Adopting fleet-ci widens the coverage SCOPE. The workflow being replaced ran
+  # `cargo llvm-cov --lib` with no features, so core/src/vfs.rs — the whole `vfs`
+  # feature adapter — was never compiled during coverage and therefore never
+  # measured. The old job was named "Coverage (100% lines)"; that number was true
+  # of what it looked at and silent about a feature-gated module.
+  #
+  # At the fleet scope vfs.rs started at 37 uncovered lines. Tests for the
+  # adapter's refusal and degradation paths took that to 27 (94.18% for the file,
+  # 99.27% workspace-wide).
+  #
+  # The remaining 27 are NOT unreachable, and are not annotated
+  # `// cov:unreachable` for that reason — that annotation asserts a proven
+  # invariant, and writing one where the truth is "untested" would be a false
+  # statement that survives review by looking rigorous. They are reachable error
+  # branches that need fixtures this repo does not have:
+  #
+  #   volume_label degradation  — needs a volume whose $Volume record or
+  #                               $VOLUME_NAME attribute is absent
+  #   .map_err(map_err) arms in — needs records crafted to make read_record or
+  #   read_dir/extents/lookup/    directory_entries fail part-way through a walk
+  #   meta/read_at                on an otherwise-mountable volume
+  #   build_meta $SI branches   — needs a record with a malformed
+  #                               $STANDARD_INFORMATION
+  #
+  # `coverage-ignore-regex: 'core/src/vfs\.rs'` was considered and rejected: it
+  # would disable the gate for all 443 lines of the file to excuse 27, so a later
+  # regression in the 416 that ARE covered would go unreported. The floor keeps
+  # every line measured and still fails on a real drop.
+  #
+  # 99 is set just below the current 99.27%, so this holds the line rather than
+  # granting slack. REMOVE WHEN: the fixtures above exist — then drop these two
+  # inputs and inherit the fleet `strict` gate.
   ci:
     uses: SecurityRonin/fleet-ci/.github/workflows/rust-ci.yml@f49dff5ddb19b17f69926210abb70f78c14c29e2
+    with:
+      coverage-gate: floor
+      coverage-floor: 99
 
   # Repo-specific, so it stays here rather than moving into the shared workflow.
   docs:
