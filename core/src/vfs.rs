@@ -510,8 +510,184 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
 
 #[cfg(test)]
 mod tests {
-    use super::{free_runs, unallocated_runs};
-    use forensic_vfs::RunAlloc;
+    use super::{
+        best_file_name, build_meta, entry_of, free_runs, map_err, namespace_rank, stream_name,
+        unallocated_runs,
+    };
+    use crate::error::NtfsError;
+    use forensic_vfs::{FileId, RunAlloc, StreamId, VfsError};
+    use forensicnomicon::ntfs::filename_namespace;
+
+    // ---- identity and stream translation -------------------------------------
+    //
+    // The happy-path tests run against a real volume, so they only ever pass a
+    // well-formed NtfsRef and the default stream. These cover the refusals: the
+    // adapter must reject an identity it cannot address rather than coerce it
+    // into a plausible-looking record number.
+
+    #[test]
+    fn entry_of_rejects_a_non_ntfs_identity() {
+        // An ext4 inode is a different identity domain entirely. Silently reading
+        // MFT record 42 because the number happens to fit would fabricate a result.
+        let err = entry_of(FileId::ExtInode { ino: 42, gen: 1 })
+            .expect_err("non-NTFS id must be refused");
+        match err {
+            VfsError::Unsupported { layer, scheme } => {
+                assert_eq!(layer, "ntfs file-id");
+                assert!(
+                    scheme.contains("42"),
+                    "the refusal must show the offending value, got {scheme:?}"
+                );
+            }
+            other => panic!("expected Unsupported, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn entry_of_accepts_an_ntfs_reference() {
+        assert_eq!(
+            entry_of(FileId::NtfsRef { entry: 5, seq: 1 }).expect("NtfsRef is addressable"),
+            5
+        );
+    }
+
+    #[test]
+    fn stream_name_refuses_a_named_stream_rather_than_reading_the_default() {
+        // A named-stream id cannot be mapped back to its ADS name. Falling back to
+        // the default $DATA would return the wrong bytes under a right-looking
+        // request — the failure mode this refusal exists to prevent.
+        let err = stream_name(StreamId::Named(7)).expect_err("named stream must be refused");
+        assert!(
+            matches!(err, VfsError::Unsupported { layer, .. } if layer == "ntfs stream"),
+            "expected an ntfs stream refusal"
+        );
+    }
+
+    #[test]
+    fn stream_name_maps_the_default_stream_to_none() {
+        assert_eq!(
+            stream_name(StreamId::Default).expect("default stream is addressable"),
+            None
+        );
+    }
+
+    // ---- error translation ---------------------------------------------------
+
+    #[test]
+    fn map_err_keeps_io_distinct_from_decode() {
+        // The distinction is load-bearing: an I/O failure means the evidence could
+        // not be read (a bootstrap problem), while a decode failure means the bytes
+        // were read and are malformed. Collapsing them would let a failed read
+        // masquerade as a corrupt filesystem.
+        let io = map_err(NtfsError::Io(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "short read",
+        )));
+        assert!(
+            matches!(io, VfsError::Io { op, .. } if op == "ntfs read"),
+            "an NtfsError::Io must stay an I/O error"
+        );
+    }
+
+    #[test]
+    fn map_err_carries_the_original_message_into_decode() {
+        let decoded = map_err(NtfsError::BadRecordSignature(*b"BAAD"));
+        match decoded {
+            VfsError::Decode { layer, detail, .. } => {
+                assert_eq!(layer, "ntfs");
+                assert!(
+                    !detail.is_empty(),
+                    "the original ntfs-core message must survive, not be dropped"
+                );
+            }
+            other => panic!("expected Decode, got {other:?}"),
+        }
+    }
+
+    // ---- name-link ranking ---------------------------------------------------
+
+    #[test]
+    fn namespace_rank_prefers_the_human_name_over_the_8_3_short_name() {
+        // A record commonly carries both a Win32 name and a DOS 8.3 name. Ranking
+        // decides which one an examiner sees, so the ordering is asserted whole
+        // rather than one arm at a time.
+        let dos = namespace_rank(filename_namespace::DOS);
+        assert!(
+            namespace_rank(filename_namespace::WIN32_AND_DOS)
+                > namespace_rank(filename_namespace::WIN32)
+                && namespace_rank(filename_namespace::WIN32)
+                    > namespace_rank(filename_namespace::POSIX)
+                && namespace_rank(filename_namespace::POSIX) > dos,
+            "ranking must be WIN32_AND_DOS > WIN32 > POSIX > DOS"
+        );
+    }
+
+    #[test]
+    fn namespace_rank_treats_an_unknown_namespace_as_least_preferred() {
+        // An unrecognised namespace byte must never outrank a real Win32 name.
+        assert!(namespace_rank(0xAB) < namespace_rank(filename_namespace::WIN32));
+    }
+
+    // ---- refusing to fabricate on malformed records --------------------------
+
+    #[test]
+    fn best_file_name_returns_none_on_a_record_that_does_not_parse() {
+        // Not a panic and not an invented name: a record whose header will not
+        // parse yields no name, so the caller cannot present a fabricated one.
+        assert!(best_file_name(&[0u8; 64]).is_none());
+        assert!(best_file_name(&[]).is_none());
+        assert!(best_file_name(&[0xFF; 1024]).is_none());
+    }
+
+    /// A record whose header parses but whose attribute offset points outside
+    /// the buffer — the shape a corrupt or carved record actually has.
+    fn header_valid_attrs_broken() -> Vec<u8> {
+        let mut rec = vec![0u8; 1024];
+        rec[..4].copy_from_slice(b"FILE");
+        // mft_offsets::FIRST_ATTRIBUTE (0x14): past the end of the record.
+        rec[0x14..0x16].copy_from_slice(&0xFFF0u16.to_le_bytes());
+        rec
+    }
+
+    #[test]
+    fn build_meta_on_a_broken_attribute_list_fabricates_no_timestamps() {
+        // Documents observed behaviour, which is NOT what I first assumed: an
+        // attribute offset pointing past the record does not produce an error.
+        // parse_attributes degrades to an empty list, so build_meta returns Ok.
+        //
+        // What must hold is that the degradation stays honest — no panic, and no
+        // invented facts. Every MAC(B) time is None rather than a zeroed
+        // FILETIME, because "1601-01-01" rendered in a timeline is a claim about
+        // the evidence that nothing in the record supports.
+        let meta = build_meta(7, &header_valid_attrs_broken())
+            .expect("an empty attribute list degrades rather than erroring");
+        assert_eq!(meta.ino, 7);
+        assert!(
+            meta.times.born.is_none()
+                && meta.times.modified.is_none()
+                && meta.times.changed.is_none()
+                && meta.times.accessed.is_none(),
+            "a record whose attributes did not parse must carry no timestamps at all"
+        );
+        assert_eq!(meta.size, 0, "no $DATA means no size, not a guess");
+    }
+
+    #[test]
+    fn best_file_name_yields_none_when_attributes_do_not_parse() {
+        // Same record shape through the naming path: no name is better than a
+        // name recovered from an attribute list that did not parse.
+        assert!(best_file_name(&header_valid_attrs_broken()).is_none());
+    }
+
+    #[test]
+    fn build_meta_surfaces_a_malformed_record_as_an_error() {
+        // build_meta must not return a default-looking FsMeta for bytes it could
+        // not parse — an all-zero record is exactly what carving hands it.
+        assert!(
+            build_meta(0, &[0u8; 1024]).is_err(),
+            "a record with no valid header must be an error, not empty metadata"
+        );
+    }
 
     #[test]
     fn free_runs_finds_maximal_zero_bit_runs() {
