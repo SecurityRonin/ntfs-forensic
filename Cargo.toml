@@ -26,7 +26,7 @@ lznt1 = "0.1"
 bitflags = "2"
 chrono = "0.4"
 regex = "1"
-mft = "0.6"
+mft = "0.7"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
