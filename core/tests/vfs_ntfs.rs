@@ -44,6 +44,19 @@ fn open_real_volume() -> Arc<dyn FileSystem> {
     Arc::new(fs)
 }
 
+/// The raw `partition.dd` bytes, so a test can mutate a real volume rather than
+/// invent one from scratch.
+fn raw_volume() -> Vec<u8> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(SAMPLE_ZIP)).expect("open sample zip");
+    let mut dd = Vec::new();
+    archive
+        .by_name("SampleTinyNtfsVolume/partition.dd")
+        .expect("partition.dd present")
+        .read_to_end(&mut dd)
+        .expect("read partition.dd");
+    dd
+}
+
 #[test]
 fn identity_matches_tsk_geometry() {
     let fs = open_real_volume();
@@ -477,5 +490,157 @@ fn an_out_of_range_record_is_an_error_not_a_panic_or_fabricated_metadata() {
     assert!(
         fs.read_at(far, StreamId::Default, 0, &mut buf).is_err(),
         "read_at must reject a record past the MFT"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Degradation on a damaged volume (T2 — real image, documented mutation).
+//
+// These are not synthetic volumes invented wholesale. Each starts from the same
+// real partition.dd the tests above validate against TSK, and applies one
+// mutation stated in the test. The expected outcome follows from the
+// construction — "the image now ends at byte N, so any record stored past N
+// cannot be read" — rather than from an expected-answer chosen by the author.
+//
+// What they assert is the property that matters for a forensic reader: damage
+// must surface as a typed error or an absent value. It must never panic, and it
+// must never degrade into a confident-looking empty answer, because a report
+// cannot tell the difference between "no label" and "could not read the label".
+// ---------------------------------------------------------------------------
+
+/// Truncate the volume to `keep` bytes: the boot sector and the start of $MFT
+/// survive, so the filesystem still mounts, but records stored beyond the cut
+/// are unreadable. This is what a partial image or a bad-sector run looks like.
+fn truncated_volume(keep: usize) -> Option<NtfsFs<Cursor<Vec<u8>>>> {
+    let mut dd = raw_volume();
+    dd.truncate(keep);
+    NtfsFs::open(Cursor::new(dd)).ok()
+}
+
+#[test]
+fn a_truncated_volume_either_refuses_to_mount_or_degrades_without_panicking() {
+    // Sweep the cut point across the image. Every outcome is acceptable except a
+    // panic: NtfsFs::open may reject the volume outright, or it may mount and
+    // then fail per-record. What must not happen is an unwind, and what must not
+    // happen is a fabricated answer.
+    for keep in [512usize, 4096, 65_536, 1 << 20, 3 << 20] {
+        let Some(fs) = truncated_volume(keep) else {
+            continue; // refused at mount time — the loud path, also fine
+        };
+
+        // A label that cannot be read is None, never a placeholder string.
+        if let Some(label) = fs.volume_label() {
+            assert!(
+                !label.is_empty(),
+                "an unreadable $Volume must yield None, not an empty label at keep={keep}"
+            );
+        }
+
+        // Walk records well past the surviving bytes. Each entry point must
+        // return Ok or Err — the assertion is that control returns at all.
+        for entry in [5u64, 64, 4096, 65_536] {
+            let id = FileId::NtfsRef { entry, seq: 1 };
+            let _ = fs.meta(id);
+            let _ = fs.read_dir(id);
+            let _ = fs.lookup(id, b"probe");
+            let _ = fs.extents(id, StreamId::Default);
+            let mut buf = [0u8; 32];
+            let _ = fs.read_at(id, StreamId::Default, 0, &mut buf);
+        }
+    }
+}
+
+#[test]
+fn truncation_actually_removes_readable_records() {
+    // Control for the sweep above. If every truncation still mounted a fully
+    // readable volume, the test would pass while exercising nothing — the
+    // "green over work never performed" failure mode. At least one cut point
+    // must produce a volume where a record the intact image serves is no longer
+    // readable.
+    let intact = open_real_volume();
+    let root = FileId::NtfsRef { entry: 5, seq: 5 };
+    assert!(
+        intact.meta(root).is_ok(),
+        "precondition: the intact volume serves its root record"
+    );
+
+    let damaged_somewhere =
+        [512usize, 4096, 65_536, 1 << 20]
+            .into_iter()
+            .any(|keep| match truncated_volume(keep) {
+                None => true, // refused to mount: damage observed
+                Some(fs) => (0..4096u64)
+                    .step_by(64)
+                    .any(|entry| fs.meta(FileId::NtfsRef { entry, seq: 1 }).is_err()),
+            });
+    assert!(
+        damaged_somewhere,
+        "no truncation produced an unreadable record — the mutation is not biting, \
+         so the degradation sweep proves nothing"
+    );
+}
+
+/// Offsets of every copy of MFT record `n` in this sample volume, found by
+/// scanning rather than assumed.
+///
+/// The image carries both $MFT and its $MFTMirr, so record 3 exists twice. A
+/// mutation that damages only one copy leaves the reader a good one to fall back
+/// on — which is exactly what the first version of this test got wrong, and why
+/// the offsets are derived from the image instead of hard-coded to one location.
+fn mft_record_offsets(dd: &[u8], n: u32) -> Vec<usize> {
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while let Some(rel) = dd[i..].windows(4).position(|w| w == b"FILE") {
+        let at = i + rel;
+        if at % 512 == 0 && at + 0x30 <= dd.len() {
+            let recno =
+                u32::from_le_bytes([dd[at + 0x2C], dd[at + 0x2D], dd[at + 0x2E], dd[at + 0x2F]]);
+            if recno == n {
+                out.push(at);
+            }
+        }
+        i = at + 4;
+    }
+    out
+}
+
+#[test]
+fn an_unreadable_volume_record_yields_no_label_rather_than_a_placeholder() {
+    // Documented mutation of the real image: overwrite the "FILE" signature on
+    // EVERY copy of MFT record 3 ($Volume) so its header will not parse, in both
+    // $MFT and $MFTMirr. $MFT's own record 0 is untouched, so the volume still
+    // mounts and the only thing lost is the label.
+    //
+    // The expected result follows from the construction rather than a chosen
+    // answer: with no readable $Volume there is no label, so the only honest
+    // output is None. A placeholder or empty string would be indistinguishable,
+    // in a report, from a volume genuinely named "".
+    let mut dd = raw_volume();
+    let offsets = mft_record_offsets(&dd, 3);
+    assert!(
+        !offsets.is_empty(),
+        "precondition: the sample volume contains a $Volume record to damage"
+    );
+    for off in &offsets {
+        dd[*off..*off + 4].copy_from_slice(b"XXXX");
+    }
+    let fs = NtfsFs::open(Cursor::new(dd)).expect("volume still mounts; only $Volume was damaged");
+
+    assert_eq!(
+        fs.volume_label(),
+        None,
+        "an unparseable $Volume record must produce no label at all"
+    );
+}
+
+#[test]
+fn the_intact_volume_does_report_a_label() {
+    // Control for the mutation above. Without it, `volume_label() == None` would
+    // pass equally well if this volume simply had no label, and the test would
+    // prove nothing about the damage.
+    let fs = open_real_volume();
+    assert!(
+        fs.volume_label().is_some(),
+        "precondition: the intact sample volume carries a label"
     );
 }
