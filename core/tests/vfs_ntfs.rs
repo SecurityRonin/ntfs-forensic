@@ -365,3 +365,117 @@ fn extents_returns_mft_runs() {
     let total: u64 = runs.iter().map(|r| r.run.len).sum();
     assert_eq!(total, 262_144);
 }
+
+// ---------------------------------------------------------------------------
+// Refusals on a real volume.
+//
+// The tests above all address the filesystem correctly, so they only ever walk
+// the happy path. These drive the same entry points with an identity from
+// another filesystem and with a named stream, on a volume that is genuinely
+// mounted — so a refusal here is the adapter's decision, not a failure to open
+// the image.
+//
+// This matters more than coverage arithmetic. `FileId` is a fleet-wide union:
+// an ext4 inode, an APFS oid and an NTFS reference are all just integers in a
+// struct. If the NTFS adapter coerced `ExtInode { ino: 5 }` into MFT record 5,
+// it would return real bytes from the wrong object under a request that looks
+// entirely valid — a wrong answer rather than an error.
+// ---------------------------------------------------------------------------
+
+/// An identity belonging to another filesystem, structurally valid but not NTFS.
+fn foreign_id() -> FileId {
+    FileId::ExtInode { ino: 5, gen: 1 }
+}
+
+#[test]
+fn every_entry_point_refuses_a_foreign_file_id() {
+    let fs = open_real_volume();
+    let bad = foreign_id();
+
+    assert!(
+        fs.read_dir(bad).is_err(),
+        "read_dir must refuse a non-NTFS id"
+    );
+    assert!(fs.meta(bad).is_err(), "meta must refuse a non-NTFS id");
+    assert!(
+        fs.lookup(bad, b"anything").is_err(),
+        "lookup must refuse a non-NTFS parent id"
+    );
+    assert!(
+        fs.extents(bad, StreamId::Default).is_err(),
+        "extents must refuse a non-NTFS id"
+    );
+    let mut buf = [0u8; 16];
+    assert!(
+        fs.read_at(bad, StreamId::Default, 0, &mut buf).is_err(),
+        "read_at must refuse a non-NTFS id"
+    );
+}
+
+#[test]
+fn byte_paths_refuse_a_named_stream_rather_than_serving_the_default() {
+    // A named-stream id cannot be mapped back to its ADS name. Serving $DATA
+    // instead would hand back the wrong stream's bytes for an ADS request —
+    // silently, and with no way for the caller to tell.
+    let fs = open_real_volume();
+    let root = FileId::NtfsRef { entry: 5, seq: 5 };
+
+    assert!(
+        fs.extents(root, StreamId::Named(1)).is_err(),
+        "extents must refuse a named stream"
+    );
+    let mut buf = [0u8; 16];
+    assert!(
+        fs.read_at(root, StreamId::Named(1), 0, &mut buf).is_err(),
+        "read_at must refuse a named stream"
+    );
+}
+
+#[test]
+fn a_valid_ntfs_id_still_works_after_the_refusals() {
+    // Control for the two tests above: they must fail because the identity is
+    // foreign, not because this volume rejects everything. The root directory
+    // resolves on the same handle.
+    let fs = open_real_volume();
+    let root = FileId::NtfsRef { entry: 5, seq: 5 };
+    assert!(
+        fs.meta(root).is_ok(),
+        "the root record must still resolve — otherwise the refusals prove nothing"
+    );
+}
+
+#[test]
+fn an_out_of_range_record_is_an_error_not_a_panic_or_fabricated_metadata() {
+    // The identity is well-formed NTFS — it just points past the end of this
+    // volume's $MFT. That is what a corrupt index entry or a carved reference
+    // looks like, and it must surface as a typed error on every entry point
+    // rather than panicking or returning default-looking metadata that an
+    // examiner would read as fact.
+    let fs = open_real_volume();
+    let far = FileId::NtfsRef {
+        entry: u64::MAX / 2,
+        seq: 1,
+    };
+
+    assert!(
+        fs.meta(far).is_err(),
+        "meta must reject a record past the MFT"
+    );
+    assert!(
+        fs.read_dir(far).is_err(),
+        "read_dir must reject a record past the MFT"
+    );
+    assert!(
+        fs.lookup(far, b"x").is_err(),
+        "lookup must reject a parent past the MFT"
+    );
+    assert!(
+        fs.extents(far, StreamId::Default).is_err(),
+        "extents must reject a record past the MFT"
+    );
+    let mut buf = [0u8; 16];
+    assert!(
+        fs.read_at(far, StreamId::Default, 0, &mut buf).is_err(),
+        "read_at must reject a record past the MFT"
+    );
+}
