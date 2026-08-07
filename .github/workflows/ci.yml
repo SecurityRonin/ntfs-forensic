@@ -52,7 +52,7 @@ jobs:
   # granting slack. REMOVE WHEN: the fixtures above exist — then drop these two
   # inputs and inherit the fleet `strict` gate.
   ci:
-    uses: SecurityRonin/fleet-ci/.github/workflows/rust-ci.yml@f49dff5ddb19b17f69926210abb70f78c14c29e2
+    uses: SecurityRonin/fleet-ci/.github/workflows/rust-ci.yml@f9802dca64a95eb881fd05dd3f4f16e53b97f2b3
     with:
       coverage-gate: floor
       coverage-floor: 99
