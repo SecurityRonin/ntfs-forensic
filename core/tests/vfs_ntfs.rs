@@ -75,7 +75,11 @@ fn find_entry(fs: &dyn FileSystem, rel: &str) -> Option<DirEntry> {
         }
         for e in fs.read_dir(id).ok()?.collect::<Result<Vec<_>, _>>().ok()? {
             let name = String::from_utf8_lossy(&e.name).into_owned();
-            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            let path = if prefix.is_empty() {
+                name.clone()
+            } else {
+                format!("{prefix}/{name}")
+            };
             if path == rel {
                 return Some(e);
             }
@@ -102,7 +106,11 @@ fn symlink_surfaces_as_symlink_with_target() {
     let fs = NtfsFs::open(Cursor::new(dd)).expect("open NTFS volume");
 
     let link = find_entry(&fs, "nested/readme-link.txt").expect("readme-link.txt present");
-    assert_eq!(link.kind, NodeKind::Symlink, "the adapter must classify the IntxLNK record as a symlink");
+    assert_eq!(
+        link.kind,
+        NodeKind::Symlink,
+        "the adapter must classify the IntxLNK record as a symlink"
+    );
     assert_eq!(
         fs.read_link(link.id, 4096).expect("read_link"),
         b"../README.txt",
@@ -114,7 +122,11 @@ fn symlink_surfaces_as_symlink_with_target() {
     // A regular file is not a link and reads an empty target, not an error.
     let readme = find_entry(&fs, "README.txt").expect("README.txt present");
     assert_eq!(readme.kind, NodeKind::File);
-    assert_eq!(fs.read_link(readme.id, 4096).expect("read_link regular file"), b"");
+    assert_eq!(
+        fs.read_link(readme.id, 4096)
+            .expect("read_link regular file"),
+        b""
+    );
 }
 
 #[test]

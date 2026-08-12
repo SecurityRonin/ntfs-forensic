@@ -83,8 +83,9 @@ fn decode_reparse_buffer(content: &[u8]) -> Option<String> {
     Some(String::from_utf16_lossy(&utf16le(path)))
 }
 
-/// Decode the ntfs-3g `IntxLNK` `$DATA` payload: the magic plus a version
-/// byte, then the UTF-16LE target path.
+/// Decode the ntfs-3g `IntxLNK` `$DATA` payload: the 7-byte magic (the
+/// version byte is not validated — matching ntfs-3g and 7-Zip, which accept
+/// any version), then the UTF-16LE target path.
 fn decode_ntfs3g_symlink(data: &[u8]) -> Option<String> {
     if data.len() >= 8 && data.starts_with(NTFS_3G_SYMLINK_MAGIC) {
         Some(String::from_utf16_lossy(&utf16le(&data[8..])))
@@ -507,9 +508,12 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         let entry = entry_of(ino)?;
         let rec = self.read_record(entry).map_err(map_err)?;
         let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
-        let attrs = parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
+        let attrs =
+            parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
         // A non-link node reads as an empty target, not a per-node error.
-        Ok(reparse_target(&rec, &attrs).unwrap_or_default().into_bytes())
+        Ok(reparse_target(&rec, &attrs)
+            .unwrap_or_default()
+            .into_bytes())
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
@@ -630,7 +634,6 @@ mod tests {
     // adapter must reject an identity it cannot address rather than coerce it
     // into a plausible-looking record number.
 
-
     #[test]
     fn reparse_buffer_decodes_symlink_substitute_name() {
         // A Windows symlink reparse buffer: tag 0xA000000C; the substitute
@@ -670,7 +673,10 @@ mod tests {
         buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf.extend_from_slice(&path_bytes);
-        assert_eq!(decode_reparse_buffer(&buf).as_deref(), Some("\\??\\C:\\mount"));
+        assert_eq!(
+            decode_reparse_buffer(&buf).as_deref(),
+            Some("\\??\\C:\\mount")
+        );
         // An unrelated tag (OneDrive placeholder 0x80000018) is not a link.
         buf[0..4].copy_from_slice(&0x8000_0018u32.to_le_bytes());
         assert_eq!(decode_reparse_buffer(&buf), None);
@@ -688,7 +694,10 @@ mod tests {
         for u in "../README.txt".encode_utf16() {
             data.extend_from_slice(&u.to_le_bytes());
         }
-        assert_eq!(decode_ntfs3g_symlink(&data).as_deref(), Some("../README.txt"));
+        assert_eq!(
+            decode_ntfs3g_symlink(&data).as_deref(),
+            Some("../README.txt")
+        );
         // A plain file's data is not a link.
         assert_eq!(decode_ntfs3g_symlink(b"README.txt"), None);
         assert_eq!(decode_ntfs3g_symlink(b""), None);
@@ -739,7 +748,10 @@ mod tests {
         buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
         buf.extend_from_slice(&path_bytes);
         let (rec, attrs) = crafted_record(&[(0xC0, &buf)]);
-        assert_eq!(reparse_target(&rec, &attrs).as_deref(), Some("\\??\\C:\\link"));
+        assert_eq!(
+            reparse_target(&rec, &attrs).as_deref(),
+            Some("\\??\\C:\\link")
+        );
     }
 
     #[test]
@@ -751,7 +763,10 @@ mod tests {
             data.extend_from_slice(&u.to_le_bytes());
         }
         let (rec, attrs) = crafted_record(&[(0x80, &data)]);
-        assert_eq!(reparse_target(&rec, &attrs).as_deref(), Some("../README.txt"));
+        assert_eq!(
+            reparse_target(&rec, &attrs).as_deref(),
+            Some("../README.txt")
+        );
     }
 
     #[test]
