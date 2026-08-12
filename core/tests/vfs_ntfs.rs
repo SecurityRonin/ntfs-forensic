@@ -20,8 +20,8 @@ use std::io::{Cursor, Read};
 use std::sync::Arc;
 
 use forensic_vfs::{
-    Allocation, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, RunAlloc, SectorSizes,
-    StreamId, TimeZonePolicy,
+    Allocation, DirEntry, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, RunAlloc,
+    SectorSizes, StreamId, TimeZonePolicy,
 };
 use ntfs_core::NtfsFs;
 
@@ -29,6 +29,10 @@ use ntfs_core::NtfsFs;
 /// partition. `tests/` is excluded from the published tarball, so `include_bytes!`
 /// of the repo-root fixture is safe here (matches `parity_mft.rs` / `real_image.rs`).
 const SAMPLE_ZIP: &[u8] = include_bytes!("../../tests/data/SampleTinyNtfsVolume.zip");
+
+/// The committed tiny NTFS volume with an ntfs-3g `IntxLNK` symlink (provenance
+/// in `tests/data/README.md`).
+const TINY_ZIP: &[u8] = include_bytes!("../../tests/data/tiny.zip");
 
 /// Extract `partition.dd` from the zip in memory and open it as an
 /// `Arc<dyn FileSystem>` — proving `NtfsFs` composes object-safely.
@@ -55,6 +59,62 @@ fn raw_volume() -> Vec<u8> {
         .read_to_end(&mut dd)
         .expect("read partition.dd");
     dd
+}
+
+/// Walks `fs` recursively and returns the entry whose path is `rel` (joined
+/// with `/`), if present.
+fn find_entry(fs: &dyn FileSystem, rel: &str) -> Option<DirEntry> {
+    // Cycle-guarded like the engine's own walker: NTFS emits `.`/`..`-style
+    // FILE_NAME entries that carry the directory flag, so a naive walk of a
+    // real volume would loop forever on the parent reference.
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![(fs.root(), String::new())];
+    while let Some((id, prefix)) = stack.pop() {
+        if !visited.insert(id) {
+            continue;
+        }
+        for e in fs.read_dir(id).ok()?.collect::<Result<Vec<_>, _>>().ok()? {
+            let name = String::from_utf8_lossy(&e.name).into_owned();
+            let path = if prefix.is_empty() { name.clone() } else { format!("{prefix}/{name}") };
+            if path == rel {
+                return Some(e);
+            }
+            if e.kind == NodeKind::Dir {
+                stack.push((e.id, path));
+            }
+        }
+    }
+    None
+}
+
+#[test]
+fn symlink_surfaces_as_symlink_with_target() {
+    // The committed tiny.zip volume carries an ntfs-3g-authored `IntxLNK`
+    // symlink; the patched adapter must classify it and decode the target
+    // exactly as ntfs-3g's own mount does (../README.txt).
+    let mut archive = zip::ZipArchive::new(Cursor::new(TINY_ZIP)).expect("open tiny zip");
+    let mut dd = Vec::new();
+    archive
+        .by_name("tiny.img")
+        .expect("tiny.img present")
+        .read_to_end(&mut dd)
+        .expect("read tiny.img");
+    let fs = NtfsFs::open(Cursor::new(dd)).expect("open NTFS volume");
+
+    let link = find_entry(&fs, "nested/readme-link.txt").expect("readme-link.txt present");
+    assert_eq!(link.kind, NodeKind::Symlink, "the adapter must classify the IntxLNK record as a symlink");
+    assert_eq!(
+        fs.read_link(link.id, 4096).expect("read_link"),
+        b"../README.txt",
+        "the decoded target must match ntfs-3g's own resolution"
+    );
+    let meta = fs.meta(link.id).expect("symlink meta");
+    assert_eq!(meta.kind, NodeKind::Symlink);
+
+    // A regular file is not a link and reads an empty target, not an error.
+    let readme = find_entry(&fs, "README.txt").expect("README.txt present");
+    assert_eq!(readme.kind, NodeKind::File);
+    assert_eq!(fs.read_link(readme.id, 4096).expect("read_link regular file"), b"");
 }
 
 #[test]

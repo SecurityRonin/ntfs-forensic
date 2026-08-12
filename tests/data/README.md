@@ -95,3 +95,14 @@ fixup against genuine on-disk bytes (doer-checker) rather than a self-encoded sy
 | File | Bytes | MD5 |
 |---|---|---|
 | `real_logfile_rcrd_page.bin` | 4096 | `b5ef734e91222a606b675ced9db2ea92` |
+### tiny.zip — NTFS volume with an ntfs-3g `IntxLNK` symlink
+
+- **Source:** an 8 MiB NTFS volume authored with `mkntfs` (ntfs-3g 2022.10.3) inside a
+  privileged `ubuntu:24.04` container (loop mount, no FUSE), populated via `cp -a` from a
+  small tree: `README.txt`, `nested/file.txt`, and a symlink `nested/readme-link.txt ->
+  ../README.txt` created by the Linux UDF/ntfs-3g driver. ntfs-3g stores symlinks as a
+  resident unnamed `$DATA` whose content is the 8-byte `IntxLNK\x01` magic followed by the
+  UTF-16LE target — no `$REPARSE_POINT` attribute is written.
+- **Ground truth:** ntfs-3g's own mount resolves the symlink to `../README.txt`; the same
+  record is listed by 7-Zip as a symlink (34 bytes).
+- **Consumed by:** `core/tests/vfs_ntfs.rs` `symlink_surfaces_as_symlink_with_target`.

@@ -615,9 +615,10 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_file_name, build_meta, entry_of, free_runs, map_err, namespace_rank, stream_name,
-        unallocated_runs,
+        best_file_name, build_meta, decode_ntfs3g_symlink, decode_reparse_buffer, entry_of,
+        free_runs, map_err, namespace_rank, reparse_target, stream_name, unallocated_runs,
     };
+    use crate::attribute::{Attribute, AttributeBody};
     use crate::error::NtfsError;
     use forensic_vfs::{FileId, RunAlloc, StreamId, VfsError};
     use forensicnomicon::ntfs::filename_namespace;
@@ -632,41 +633,43 @@ mod tests {
 
     #[test]
     fn reparse_buffer_decodes_symlink_substitute_name() {
-        // A Windows symlink reparse buffer: tag 0xA000000C, data length 12,
-        // substitute name "\\??\\C:\\link" (UTF-16LE, 14 bytes) at
-        // PathBuffer offset 0, print name at offset 14.
+        // A Windows symlink reparse buffer: tag 0xA000000C; the substitute
+        // name "\\??\\C:\\link" (11 UTF-16LE chars = 22 bytes) sits at
+        // PathBuffer offset 0. ReparseDataLength = 8 header + 22 = 30.
+        let path_bytes: Vec<u8> = "\\??\\C:\\link"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let mut buf = Vec::new();
         buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes());
-        buf.extend_from_slice(&12u16.to_le_bytes());
+        buf.extend_from_slice(&(8 + path_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
-        buf.extend_from_slice(&14u16.to_le_bytes()); // SubstituteNameLength
-        buf.extend_from_slice(&14u16.to_le_bytes()); // PrintNameOffset
-        buf.extend_from_slice(&6u16.to_le_bytes()); // PrintNameLength
-        let target = "\\??\\C:\\link";
-        let mut path: Vec<u8> = Vec::new();
-        for u in target.encode_utf16() {
-            path.extend_from_slice(&u.to_le_bytes());
-        }
-        buf.extend_from_slice(&path);
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // PrintNameOffset (end)
+        buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
+        buf.extend_from_slice(&path_bytes);
         let decoded = decode_reparse_buffer(&buf).expect("symlink buffer decodes");
         assert_eq!(decoded, "\\??\\C:\\link");
     }
 
     #[test]
     fn reparse_buffer_accepts_mount_point_and_rejects_others() {
-        // Mount point (junction) tag 0xA0000003, substitute "\\??\\C:\\mount".
+        // Mount point (junction) tag 0xA0000003, substitute "\\??\\C:\\mount"
+        // (22 UTF-16LE bytes; ReparseDataLength = 8 + 22 = 30).
+        let path_bytes: Vec<u8> = "\\??\\C:\\mount"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
         let mut buf = Vec::new();
         buf.extend_from_slice(&0xA000_0003u32.to_le_bytes());
-        buf.extend_from_slice(&10u16.to_le_bytes());
+        buf.extend_from_slice(&(8 + path_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(&12u16.to_le_bytes());
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(&6u16.to_le_bytes());
-        for u in "\\??\\C:\\mount".encode_utf16() {
-            buf.extend_from_slice(&u.to_le_bytes());
-        }
+        buf.extend_from_slice(&path_bytes);
         assert_eq!(decode_reparse_buffer(&buf).as_deref(), Some("\\??\\C:\\mount"));
         // An unrelated tag (OneDrive placeholder 0x80000018) is not a link.
         buf[0..4].copy_from_slice(&0x8000_0018u32.to_le_bytes());
@@ -689,6 +692,99 @@ mod tests {
         // A plain file's data is not a link.
         assert_eq!(decode_ntfs3g_symlink(b"README.txt"), None);
         assert_eq!(decode_ntfs3g_symlink(b""), None);
+    }
+
+    /// Build a minimal synthetic MFT record carrying one resident attribute
+    /// whose content sits at `content_offset`, and the matching [`Attribute`]
+    /// descriptor — enough for the `reparse_target` classifier.
+    fn crafted_record(attrs: &[(u32, &[u8])]) -> (Vec<u8>, Vec<Attribute>) {
+        let mut rec = vec![0u8; 256];
+        let mut out = Vec::new();
+        let mut offset = 64usize;
+        for (type_code, content) in attrs {
+            rec[offset..offset + content.len()].copy_from_slice(content);
+            out.push(Attribute {
+                type_code: *type_code,
+                length: 0,
+                non_resident: false,
+                name: None,
+                flags: 0,
+                attribute_id: 0,
+                offset: 0,
+                body: AttributeBody::Resident {
+                    content_offset: offset as u16,
+                    content_length: content.len() as u32,
+                },
+            });
+            offset += content.len() + 16;
+        }
+        (rec, out)
+    }
+
+    #[test]
+    fn reparse_target_windows_reparse_attribute_decodes_substitute_name() {
+        // A Windows-created symlink: the $REPARSE_POINT (0xC0) attribute holds
+        // a symlink reparse buffer whose substitute name is the on-disk truth.
+        let path_bytes: Vec<u8> = "\\??\\C:\\link"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes()); // tag: symlink
+        buf.extend_from_slice(&(8 + path_bytes.len() as u16).to_le_bytes()); // ReparseDataLength
+        buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // PrintNameOffset (end)
+        buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
+        buf.extend_from_slice(&path_bytes);
+        let (rec, attrs) = crafted_record(&[(0xC0, &buf)]);
+        assert_eq!(reparse_target(&rec, &attrs).as_deref(), Some("\\??\\C:\\link"));
+    }
+
+    #[test]
+    fn reparse_target_ntfs3g_intxlnk_data_decodes_target() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IntxLNK");
+        data.push(0x01);
+        for u in "../README.txt".encode_utf16() {
+            data.extend_from_slice(&u.to_le_bytes());
+        }
+        let (rec, attrs) = crafted_record(&[(0x80, &data)]);
+        assert_eq!(reparse_target(&rec, &attrs).as_deref(), Some("../README.txt"));
+    }
+
+    #[test]
+    fn reparse_target_plain_file_and_unknown_tags_are_not_links() {
+        // A plain file: regular $DATA without the magic → None.
+        let (rec, attrs) = crafted_record(&[(0x80, b"README.txt")]);
+        assert_eq!(reparse_target(&rec, &attrs), None);
+        // A $REPARSE_POINT with an unrelated tag (OneDrive placeholder) → None.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0x8000_0018u32.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        let (rec, attrs) = crafted_record(&[(0xC0, &buf)]);
+        assert_eq!(reparse_target(&rec, &attrs), None);
+        // A record with no $DATA and no reparse attribute → None.
+        let (rec, attrs) = crafted_record(&[]);
+        assert_eq!(reparse_target(&rec, &attrs), None);
+        // The IntxLNK magic alone (without the version byte + target) → None.
+        let (rec, attrs) = crafted_record(&[(0x80, b"IntxLNK")]);
+        assert_eq!(reparse_target(&rec, &attrs), None);
+    }
+
+    #[test]
+    fn reparse_buffer_and_intxlnk_decoders_are_bounds_safe() {
+        assert_eq!(decode_reparse_buffer(&[]), None);
+        assert_eq!(decode_reparse_buffer(&[0u8; 7]), None);
+        // ReparseDataLength larger than the buffer → None, never a panic.
+        let mut buf = vec![0u8; 16];
+        buf[0..4].copy_from_slice(&0xA000_000Cu32.to_le_bytes());
+        buf[4..6].copy_from_slice(&0xFFFFu16.to_le_bytes());
+        assert_eq!(decode_reparse_buffer(&buf), None);
+        assert_eq!(decode_ntfs3g_symlink(b""), None);
+        assert_eq!(decode_ntfs3g_symlink(b"IntxLNK"), None);
     }
 
     #[test]
