@@ -19,7 +19,7 @@ use forensic_vfs::{
 };
 use forensicnomicon::ntfs::{attr_types, filename_namespace, mft_records};
 
-use crate::attribute::AttributeBody;
+use crate::attribute::{Attribute, AttributeBody};
 use crate::error::NtfsError;
 use crate::file_name::FileName;
 use crate::fs::NtfsFs;
@@ -33,6 +33,83 @@ use crate::time::Filetime;
 /// `FILE_ATTRIBUTE_DIRECTORY`/index-present; it is *not* the DOS `0x10`
 /// directory bit.
 const FN_FLAG_DIRECTORY: u32 = 0x1000_0000;
+
+/// `$REPARSE_POINT` attribute type (Windows symlinks and junctions).
+const ATTR_REPARSE_POINT: u32 = 0xC0;
+
+/// Windows reparse tag for a symbolic link.
+const REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
+
+/// Windows reparse tag for a mount point (junction).
+const REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
+
+/// ntfs-3g (Linux) stores symlinks as a resident unnamed `$DATA` whose content
+/// starts with this 7-byte magic (followed by a version byte and a UTF-16LE
+/// target path). Windows-created symlinks instead carry a `$REPARSE_POINT`
+/// attribute; both forms are recognized.
+const NTFS_3G_SYMLINK_MAGIC: &[u8] = b"IntxLNK";
+
+fn utf16le(bytes: &[u8]) -> Vec<u16> {
+    bytes
+        .chunks_exact(2)
+        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+        .collect()
+}
+
+/// Decode a `$REPARSE_POINT` value for a symlink or mount point: the
+/// substitute name (the on-disk truth, usually `\??\C:\…`), UTF-16LE.
+/// `None` for an unrecognized tag or a malformed buffer — never a fabricated
+/// target.
+fn decode_reparse_buffer(content: &[u8]) -> Option<String> {
+    if content.len() < 8 {
+        return None;
+    }
+    let tag = u32::from_le_bytes(content[0..4].try_into().ok()?);
+    if tag != REPARSE_TAG_SYMLINK && tag != REPARSE_TAG_MOUNT_POINT {
+        return None;
+    }
+    let data_len = usize::from(u16::from_le_bytes(content[4..6].try_into().ok()?));
+    let data = content.get(8..8 + data_len)?;
+    // SymbolicLinkReparseBuffer / MountPointReparseBuffer share the layout:
+    // SubstituteNameOffset(2) SubstituteNameLength(2) PrintNameOffset(2)
+    // PrintNameLength(2) PathBuffer[…] — the substitute name is offset from
+    // the start of PathBuffer (data + 8).
+    if data.len() < 8 {
+        return None;
+    }
+    let sub_off = usize::from(u16::from_le_bytes(data[0..2].try_into().ok()?));
+    let sub_len = usize::from(u16::from_le_bytes(data[2..4].try_into().ok()?));
+    let path = data.get(8 + sub_off..8 + sub_off + sub_len)?;
+    Some(String::from_utf16_lossy(&utf16le(path)))
+}
+
+/// Decode the ntfs-3g `IntxLNK` `$DATA` payload: the magic plus a version
+/// byte, then the UTF-16LE target path.
+fn decode_ntfs3g_symlink(data: &[u8]) -> Option<String> {
+    if data.len() >= 8 && data.starts_with(NTFS_3G_SYMLINK_MAGIC) {
+        Some(String::from_utf16_lossy(&utf16le(&data[8..])))
+    } else {
+        None
+    }
+}
+
+/// The symlink target of an MFT record, when it is one: the `$REPARSE_POINT`
+/// substitute name (Windows) or the ntfs-3g `IntxLNK` `$DATA` payload (Linux).
+/// `None` for a regular file or directory.
+fn reparse_target(rec: &[u8], attrs: &[Attribute]) -> Option<String> {
+    if let Some(content) = attrs
+        .iter()
+        .find(|a| a.type_code == ATTR_REPARSE_POINT)
+        .and_then(|a| a.resident_content(rec))
+    {
+        return decode_reparse_buffer(content);
+    }
+    let data = attrs
+        .iter()
+        .find(|a| a.type_code == attr_types::DATA && a.name.is_none())?
+        .resident_content(rec)?;
+    decode_ntfs3g_symlink(data)
+}
 
 /// The MFT record number carried by a [`FileId`]. Only NTFS references address
 /// this filesystem; any other identity domain is a caller error, surfaced loud.
@@ -128,6 +205,8 @@ fn build_meta(entry: u64, rec: &[u8]) -> VfsResult<FsMeta> {
         ino: entry,
         kind: if header.is_directory() {
             NodeKind::Dir
+        } else if reparse_target(rec, &attrs).is_some() {
+            NodeKind::Symlink
         } else {
             NodeKind::File
         },
@@ -246,6 +325,26 @@ fn unallocated_runs(
         .collect()
 }
 
+impl<R: Read + Seek + Send> NtfsFs<R> {
+    /// True when the MFT record at `entry` is a symlink: it carries a
+    /// `$REPARSE_POINT` attribute (Windows symlinks/junctions) or its resident
+    /// unnamed `$DATA` starts with the ntfs-3g `IntxLNK` magic (Linux-created
+    /// symlinks). A read/parse miss degrades to `false` — the entry then reads
+    /// as a regular file rather than failing the whole listing.
+    fn is_symlink_record(&self, entry: u64) -> bool {
+        let Ok(rec) = self.read_record(entry) else {
+            return false;
+        };
+        let Ok(header) = MftRecordHeader::parse(&rec) else {
+            return false;
+        };
+        let Ok(attrs) = parse_attributes(&rec, header.first_attribute_offset as usize) else {
+            return false;
+        };
+        reparse_target(&rec, &attrs).is_some()
+    }
+}
+
 impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
     fn kind(&self) -> FsKind {
         FsKind::NTFS
@@ -319,6 +418,8 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
                 e.file_name.map(|fnm| {
                     let kind = if fnm.flags & FN_FLAG_DIRECTORY != 0 {
                         NodeKind::Dir
+                    } else if self.is_symlink_record(file_ref.record_number) {
+                        NodeKind::Symlink
                     } else {
                         NodeKind::File
                     };
@@ -402,10 +503,13 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         Ok(n)
     }
 
-    fn read_link(&self, _ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
-        // NTFS reparse points (symlinks/junctions) are out of scope for this
-        // adapter; a node with none reads as an empty target.
-        Ok(Vec::new())
+    fn read_link(&self, ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
+        let entry = entry_of(ino)?;
+        let rec = self.read_record(entry).map_err(map_err)?;
+        let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
+        let attrs = parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
+        // A non-link node reads as an empty target, not a per-node error.
+        Ok(reparse_target(&rec, &attrs).unwrap_or_default().into_bytes())
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
@@ -524,6 +628,68 @@ mod tests {
     // well-formed NtfsRef and the default stream. These cover the refusals: the
     // adapter must reject an identity it cannot address rather than coerce it
     // into a plausible-looking record number.
+
+
+    #[test]
+    fn reparse_buffer_decodes_symlink_substitute_name() {
+        // A Windows symlink reparse buffer: tag 0xA000000C, data length 12,
+        // substitute name "\\??\\C:\\link" (UTF-16LE, 14 bytes) at
+        // PathBuffer offset 0, print name at offset 14.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes());
+        buf.extend_from_slice(&12u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buf.extend_from_slice(&14u16.to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&14u16.to_le_bytes()); // PrintNameOffset
+        buf.extend_from_slice(&6u16.to_le_bytes()); // PrintNameLength
+        let target = "\\??\\C:\\link";
+        let mut path: Vec<u8> = Vec::new();
+        for u in target.encode_utf16() {
+            path.extend_from_slice(&u.to_le_bytes());
+        }
+        buf.extend_from_slice(&path);
+        let decoded = decode_reparse_buffer(&buf).expect("symlink buffer decodes");
+        assert_eq!(decoded, "\\??\\C:\\link");
+    }
+
+    #[test]
+    fn reparse_buffer_accepts_mount_point_and_rejects_others() {
+        // Mount point (junction) tag 0xA0000003, substitute "\\??\\C:\\mount".
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0xA000_0003u32.to_le_bytes());
+        buf.extend_from_slice(&10u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&12u16.to_le_bytes());
+        buf.extend_from_slice(&0u16.to_le_bytes());
+        buf.extend_from_slice(&6u16.to_le_bytes());
+        for u in "\\??\\C:\\mount".encode_utf16() {
+            buf.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_reparse_buffer(&buf).as_deref(), Some("\\??\\C:\\mount"));
+        // An unrelated tag (OneDrive placeholder 0x80000018) is not a link.
+        buf[0..4].copy_from_slice(&0x8000_0018u32.to_le_bytes());
+        assert_eq!(decode_reparse_buffer(&buf), None);
+        // Truncated buffers decode to None, never panic.
+        assert_eq!(decode_reparse_buffer(&buf[..7]), None);
+        assert_eq!(decode_reparse_buffer(b"short"), None);
+        assert_eq!(decode_reparse_buffer(&[]), None);
+    }
+
+    #[test]
+    fn ntfs3g_intxlnk_decodes_utf16_target() {
+        let mut data = Vec::new();
+        data.extend_from_slice(b"IntxLNK");
+        data.push(0x01);
+        for u in "../README.txt".encode_utf16() {
+            data.extend_from_slice(&u.to_le_bytes());
+        }
+        assert_eq!(decode_ntfs3g_symlink(&data).as_deref(), Some("../README.txt"));
+        // A plain file's data is not a link.
+        assert_eq!(decode_ntfs3g_symlink(b"README.txt"), None);
+        assert_eq!(decode_ntfs3g_symlink(b""), None);
+    }
 
     #[test]
     fn entry_of_rejects_a_non_ntfs_identity() {
