@@ -130,6 +130,41 @@ fn symlink_surfaces_as_symlink_with_target() {
 }
 
 #[test]
+fn read_link_bounds_the_target_at_cap() {
+    // `cap` is the trait's hostile-allocation bound: "Read a symlink target,
+    // capped so a hostile symlink cannot allocate without bound." Both name
+    // fields of a reparse buffer are attacker-controlled u16s, so the adapter
+    // must not return more than the caller asked for.
+    let mut archive = zip::ZipArchive::new(Cursor::new(TINY_ZIP)).expect("open tiny zip");
+    let mut dd = Vec::new();
+    archive
+        .by_name("tiny.img")
+        .expect("tiny.img present")
+        .read_to_end(&mut dd)
+        .expect("read tiny.img");
+    let fs = NtfsFs::open(Cursor::new(dd)).expect("open NTFS volume");
+    let link = find_entry(&fs, "nested/readme-link.txt").expect("readme-link.txt present");
+
+    // The full target is "../README.txt" (13 bytes); a shorter cap truncates.
+    assert_eq!(
+        fs.read_link(link.id, 4).expect("read_link capped"),
+        b"../R",
+        "a cap shorter than the target must truncate it"
+    );
+    // A zero cap allocates nothing at all.
+    assert_eq!(
+        fs.read_link(link.id, 0).expect("read_link zero cap"),
+        b"",
+        "cap == 0 must yield an empty target"
+    );
+    // A cap at or beyond the target length returns it whole.
+    assert_eq!(
+        fs.read_link(link.id, 13).expect("read_link exact cap"),
+        b"../README.txt"
+    );
+}
+
+#[test]
 fn identity_matches_tsk_geometry() {
     let fs = open_real_volume();
     assert_eq!(fs.kind(), FsKind::NTFS);
