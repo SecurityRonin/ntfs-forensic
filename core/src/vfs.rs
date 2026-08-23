@@ -70,16 +70,25 @@ fn decode_reparse_buffer(content: &[u8]) -> Option<String> {
     }
     let data_len = usize::from(u16::from_le_bytes(content[4..6].try_into().ok()?));
     let data = content.get(8..8 + data_len)?;
-    // SymbolicLinkReparseBuffer / MountPointReparseBuffer share the layout:
-    // SubstituteNameOffset(2) SubstituteNameLength(2) PrintNameOffset(2)
-    // PrintNameLength(2) PathBuffer[…] — the substitute name is offset from
-    // the start of PathBuffer (data + 8).
-    if data.len() < 8 {
+    // The two buffers do NOT share a layout: a symlink carries a 4-byte `Flags`
+    // field that a junction does not, so its PathBuffer starts four bytes later
+    // (Wine include/ddk/ntifs.h:160; MS-FSCC 2.1.2.4 vs 2.1.2.5).
+    //
+    //   both:     SubstituteNameOffset(2) SubstituteNameLength(2)
+    //             PrintNameOffset(2) PrintNameLength(2)
+    //   symlink:  Flags(4)
+    //   both:     PathBuffer[…]
+    //
+    // SubstituteNameOffset is relative to the start of PathBuffer, so the
+    // substitute name begins at `data + path_base + SubstituteNameOffset`.
+    // Reading a symlink at +8 lands inside Flags and truncates the target.
+    let path_base = if tag == REPARSE_TAG_SYMLINK { 12 } else { 8 };
+    if data.len() < path_base {
         return None;
     }
     let sub_off = usize::from(u16::from_le_bytes(data[0..2].try_into().ok()?));
     let sub_len = usize::from(u16::from_le_bytes(data[2..4].try_into().ok()?));
-    let path = data.get(8 + sub_off..8 + sub_off + sub_len)?;
+    let path = data.get(path_base + sub_off..path_base + sub_off + sub_len)?;
     Some(String::from_utf16_lossy(&utf16le(path)))
 }
 
@@ -635,25 +644,41 @@ mod tests {
     // into a plausible-looking record number.
 
     #[test]
-    fn reparse_buffer_decodes_symlink_substitute_name() {
-        // A Windows symlink reparse buffer: tag 0xA000000C; the substitute
-        // name "\\??\\C:\\link" (11 UTF-16LE chars = 22 bytes) sits at
-        // PathBuffer offset 0. ReparseDataLength = 8 header + 22 = 30.
-        let path_bytes: Vec<u8> = "\\??\\C:\\link"
+    fn reparse_buffer_honors_substitute_name_offset_and_ignores_flags() {
+        // A relative symlink (`mklink /D dir ..\target.txt`), which exercises
+        // two things a zero-offset fixture cannot: a non-zero
+        // SubstituteNameOffset, and a non-zero Flags word that must not leak
+        // into the decoded target.
+        //
+        // PathBuffer holds the print name first, then the substitute name:
+        //   [0 .. 20)  "target.txt"      <- PrintName
+        //   [20 .. 46) "..\target.txt"   <- SubstituteName
+        let print_bytes: Vec<u8> = "target.txt"
             .encode_utf16()
             .flat_map(u16::to_le_bytes)
             .collect();
+        let sub_bytes: Vec<u8> = "..\\target.txt"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let print_len = print_bytes.len() as u16;
+        let sub_len = sub_bytes.len() as u16;
         let mut buf = Vec::new();
-        buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes());
-        buf.extend_from_slice(&(8 + path_bytes.len() as u16).to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes());
-        buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
-        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // SubstituteNameLength
-        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // PrintNameOffset (end)
-        buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
-        buf.extend_from_slice(&path_bytes);
-        let decoded = decode_reparse_buffer(&buf).expect("symlink buffer decodes");
-        assert_eq!(decoded, "\\??\\C:\\link");
+        buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes()); // ReparseTag
+        buf.extend_from_slice(&(12 + print_len + sub_len).to_le_bytes()); // ReparseDataLength
+        buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        buf.extend_from_slice(&print_len.to_le_bytes()); // SubstituteNameOffset
+        buf.extend_from_slice(&sub_len.to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameOffset
+        buf.extend_from_slice(&print_len.to_le_bytes()); // PrintNameLength
+        buf.extend_from_slice(&1u32.to_le_bytes()); // Flags = SYMLINK_FLAG_RELATIVE
+        buf.extend_from_slice(&print_bytes);
+        buf.extend_from_slice(&sub_bytes);
+        assert_eq!(
+            decode_reparse_buffer(&buf).as_deref(),
+            Some("..\\target.txt"),
+            "SubstituteNameOffset is relative to PathBuffer, past Flags"
+        );
     }
 
     #[test]
@@ -773,13 +798,15 @@ mod tests {
             .flat_map(u16::to_le_bytes)
             .collect();
         let mut buf = Vec::new();
+        let len = path_bytes.len() as u16;
         buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes()); // tag: symlink
-        buf.extend_from_slice(&(8 + path_bytes.len() as u16).to_le_bytes()); // ReparseDataLength
+        buf.extend_from_slice(&(12 + len).to_le_bytes()); // ReparseDataLength (incl. Flags)
         buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
         buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
-        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // SubstituteNameLength
-        buf.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes()); // PrintNameOffset (end)
+        buf.extend_from_slice(&len.to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&len.to_le_bytes()); // PrintNameOffset (end)
         buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
+        buf.extend_from_slice(&0u32.to_le_bytes()); // Flags (symlink-only field)
         buf.extend_from_slice(&path_bytes);
         let (rec, attrs) = crafted_record(&[(0xC0, &buf)]);
         assert_eq!(
