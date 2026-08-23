@@ -657,6 +657,40 @@ mod tests {
     }
 
     #[test]
+    fn reparse_buffer_decodes_a_spec_conforming_windows_symlink() {
+        // A SymbolicLinkReparseBuffer carries a 4-byte `Flags` field that a
+        // MountPointReparseBuffer does not, so its PathBuffer begins 12 bytes
+        // into the data — not 8 (Wine include/ddk/ntifs.h:160; MS-FSCC
+        // 2.1.2.4 vs 2.1.2.5). This is the buffer Windows actually emits:
+        //
+        //   SubstituteNameOffset(2) SubstituteNameLength(2)
+        //   PrintNameOffset(2) PrintNameLength(2) Flags(4) PathBuffer[…]
+        //
+        // ReparseDataLength is therefore 12 + the path bytes, and the
+        // substitute name is offset from the start of PathBuffer (data + 12).
+        let path_bytes: Vec<u8> = "\\??\\C:\\link"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        let len = path_bytes.len() as u16;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&0xA000_000Cu32.to_le_bytes()); // ReparseTag
+        buf.extend_from_slice(&(12 + len).to_le_bytes()); // ReparseDataLength
+        buf.extend_from_slice(&0u16.to_le_bytes()); // Reserved
+        buf.extend_from_slice(&0u16.to_le_bytes()); // SubstituteNameOffset
+        buf.extend_from_slice(&len.to_le_bytes()); // SubstituteNameLength
+        buf.extend_from_slice(&len.to_le_bytes()); // PrintNameOffset (end)
+        buf.extend_from_slice(&0u16.to_le_bytes()); // PrintNameLength
+        buf.extend_from_slice(&0u32.to_le_bytes()); // Flags (SYMLINK_FLAG_ABSOLUTE)
+        buf.extend_from_slice(&path_bytes); // PathBuffer
+        assert_eq!(
+            decode_reparse_buffer(&buf).as_deref(),
+            Some("\\??\\C:\\link"),
+            "a symlink's PathBuffer starts after Flags, at data + 12"
+        );
+    }
+
+    #[test]
     fn reparse_buffer_accepts_mount_point_and_rejects_others() {
         // Mount point (junction) tag 0xA0000003, substitute "\\??\\C:\\mount"
         // (22 UTF-16LE bytes; ReparseDataLength = 8 + 22 = 30).
