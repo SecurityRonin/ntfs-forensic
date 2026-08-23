@@ -513,16 +513,21 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         Ok(n)
     }
 
-    fn read_link(&self, ino: FileId, _cap: usize) -> VfsResult<Vec<u8>> {
+    fn read_link(&self, ino: FileId, cap: usize) -> VfsResult<Vec<u8>> {
         let entry = entry_of(ino)?;
         let rec = self.read_record(entry).map_err(map_err)?;
         let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
         let attrs =
             parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
         // A non-link node reads as an empty target, not a per-node error.
-        Ok(reparse_target(&rec, &attrs)
+        let mut target = reparse_target(&rec, &attrs)
             .unwrap_or_default()
-            .into_bytes())
+            .into_bytes();
+        // Both name fields of a reparse buffer are image-controlled u16s, so a
+        // hostile symlink must not allocate past what the caller asked for
+        // (matches the ext4/xfs/ufs/btrfs/zfs adapters).
+        target.truncate(cap);
+        Ok(target)
     }
 
     fn deleted(&self) -> VfsResult<NodeStream> {
