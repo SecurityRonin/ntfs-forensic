@@ -300,10 +300,16 @@ fn build_meta(entry: u64, rec: &[u8]) -> VfsResult<FsMeta> {
 
     Ok(FsMeta {
         ino: entry,
-        kind: if header.is_directory() {
-            NodeKind::Dir
-        } else {
-            special_kind(rec, &attrs).unwrap_or(NodeKind::File)
+        // A reparse point is checked BEFORE the directory flag: a directory
+        // symlink and a junction both set that flag while redirecting
+        // elsewhere, so reporting `Dir` would hide the redirection and invite a
+        // consumer to walk into it — the junction-loop hazard. Windows' own
+        // `dir` makes the same distinction (`<JUNCTION>`/`<SYMLINKD>`, never
+        // `<DIR>`).
+        kind: match special_kind(rec, &attrs) {
+            Some(kind) => kind,
+            None if header.is_directory() => NodeKind::Dir,
+            None => NodeKind::File,
         },
         allocated: if header.is_in_use() {
             Allocation::Allocated
@@ -506,11 +512,13 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
             .filter_map(|e| {
                 let file_ref = e.file_reference;
                 e.file_name.map(|fnm| {
-                    let kind = if fnm.flags & FN_FLAG_DIRECTORY != 0 {
-                        NodeKind::Dir
-                    } else {
-                        self.special_kind_of_record(file_ref.record_number)
-                            .unwrap_or(NodeKind::File)
+                    // Reparse point first, for the same reason as `build_meta`:
+                    // a directory symlink / junction sets the directory flag
+                    // while redirecting, and must not read as a plain `Dir`.
+                    let kind = match self.special_kind_of_record(file_ref.record_number) {
+                        Some(kind) => kind,
+                        None if fnm.flags & FN_FLAG_DIRECTORY != 0 => NodeKind::Dir,
+                        None => NodeKind::File,
                     };
                     Ok(DirEntry {
                         name: fnm.name.into_bytes(),
