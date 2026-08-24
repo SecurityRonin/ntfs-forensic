@@ -43,11 +43,39 @@ const REPARSE_TAG_SYMLINK: u32 = 0xA000_000C;
 /// Windows reparse tag for a mount point (junction).
 const REPARSE_TAG_MOUNT_POINT: u32 = 0xA000_0003;
 
+/// WSL reparse tag for a symbolic link (`ntfs-3g` `-o special_files=wsl`, and
+/// the Windows Subsystem for Linux itself). Distinct from the classic
+/// `0xA000000C`: the payload is a version word plus a **UTF-8** target, not a
+/// `SubstituteName`/`PrintName` pair.
+const REPARSE_TAG_LX_SYMLINK: u32 = 0xA000_001D;
+
+/// WSL reparse tag for a unix-domain socket. Carries no payload — the tag is
+/// the whole statement.
+const REPARSE_TAG_AF_UNIX: u32 = 0x8000_0023;
+
+/// WSL reparse tag for a FIFO / named pipe. No payload.
+const REPARSE_TAG_LX_FIFO: u32 = 0x8000_0024;
+
+/// WSL reparse tag for a character device. The major/minor pair lives in an
+/// `$EA`, not in the reparse point.
+const REPARSE_TAG_LX_CHR: u32 = 0x8000_0025;
+
+/// WSL reparse tag for a block device. Major/minor in an `$EA`, as for
+/// [`REPARSE_TAG_LX_CHR`].
+const REPARSE_TAG_LX_BLK: u32 = 0x8000_0026;
+
 /// ntfs-3g (Linux) stores symlinks as a resident unnamed `$DATA` whose content
 /// starts with this 7-byte magic (followed by a version byte and a UTF-16LE
 /// target path). Windows-created symlinks instead carry a `$REPARSE_POINT`
 /// attribute; both forms are recognized.
 const NTFS_3G_SYMLINK_MAGIC: &[u8] = b"IntxLNK";
+
+/// ntfs-3g's Interix encoding for a character device: the magic is followed by
+/// a 64-bit major/minor pair rather than a path.
+const NTFS_3G_CHR_MAGIC: &[u8] = b"IntxCHR";
+
+/// ntfs-3g's Interix encoding for a block device.
+const NTFS_3G_BLK_MAGIC: &[u8] = b"IntxBLK";
 
 fn utf16le(bytes: &[u8]) -> Vec<u16> {
     bytes
@@ -119,6 +147,65 @@ fn reparse_target(rec: &[u8], attrs: &[Attribute]) -> Option<String> {
         .find(|a| a.type_code == attr_types::DATA && a.name.is_none())?
         .resident_content(rec)?;
     decode_ntfs3g_symlink(data)
+}
+
+/// The node kind a `$REPARSE_POINT` tag denotes, for the tags that describe a
+/// POSIX node type. `None` for a tag this reader does not model (a dedup
+/// pointer, a cloud placeholder, an unknown vendor tag) — those are not node
+/// types and must not be reported as one.
+fn kind_of_reparse_tag(tag: u32) -> Option<NodeKind> {
+    match tag {
+        REPARSE_TAG_SYMLINK | REPARSE_TAG_MOUNT_POINT | REPARSE_TAG_LX_SYMLINK => {
+            Some(NodeKind::Symlink)
+        }
+        REPARSE_TAG_LX_CHR => Some(NodeKind::CharDevice),
+        REPARSE_TAG_LX_BLK => Some(NodeKind::BlockDevice),
+        REPARSE_TAG_LX_FIFO => Some(NodeKind::Fifo),
+        REPARSE_TAG_AF_UNIX => Some(NodeKind::Socket),
+        _ => None,
+    }
+}
+
+/// Classify a non-directory MFT record that carries a POSIX node type, in
+/// either encoding a Linux driver writes.
+///
+/// Returns `None` when the record states no such type — an ordinary file, or a
+/// reparse point of a kind this reader does not model.
+///
+/// **Not every type survives every encoding.** ntfs-3g's Interix mode stores a
+/// FIFO as a zero-length `$DATA` and a socket as a one-byte `$DATA`, neither
+/// carrying a magic (`libntfs-3g/dir.c`). Those are indistinguishable from
+/// ordinary files on disk, so they are not classified here — inferring a FIFO
+/// from "empty file" would fabricate an observation the volume never made.
+fn special_kind(rec: &[u8], attrs: &[Attribute]) -> Option<NodeKind> {
+    if let Some(content) = attrs
+        .iter()
+        .find(|a| a.type_code == ATTR_REPARSE_POINT)
+        .and_then(|a| a.resident_content(rec))
+    {
+        if content.len() >= 4 {
+            let tag = u32::from_le_bytes(content[0..4].try_into().ok()?);
+            return kind_of_reparse_tag(tag);
+        }
+        return None;
+    }
+    // Interix: the type is the first 7 bytes of the unnamed resident $DATA.
+    let data = attrs
+        .iter()
+        .find(|a| a.type_code == attr_types::DATA && a.name.is_none())?
+        .resident_content(rec)?;
+    if data.len() < 8 {
+        return None;
+    }
+    if data.starts_with(NTFS_3G_SYMLINK_MAGIC) {
+        Some(NodeKind::Symlink)
+    } else if data.starts_with(NTFS_3G_CHR_MAGIC) {
+        Some(NodeKind::CharDevice)
+    } else if data.starts_with(NTFS_3G_BLK_MAGIC) {
+        Some(NodeKind::BlockDevice)
+    } else {
+        None
+    }
 }
 
 /// The MFT record number carried by a [`FileId`]. Only NTFS references address
@@ -213,12 +300,16 @@ fn build_meta(entry: u64, rec: &[u8]) -> VfsResult<FsMeta> {
 
     Ok(FsMeta {
         ino: entry,
-        kind: if header.is_directory() {
-            NodeKind::Dir
-        } else if reparse_target(rec, &attrs).is_some() {
-            NodeKind::Symlink
-        } else {
-            NodeKind::File
+        // A reparse point is checked BEFORE the directory flag: a directory
+        // symlink and a junction both set that flag while redirecting
+        // elsewhere, so reporting `Dir` would hide the redirection and invite a
+        // consumer to walk into it — the junction-loop hazard. Windows' own
+        // `dir` makes the same distinction (`<JUNCTION>`/`<SYMLINKD>`, never
+        // `<DIR>`).
+        kind: match special_kind(rec, &attrs) {
+            Some(kind) => kind,
+            None if header.is_directory() => NodeKind::Dir,
+            None => NodeKind::File,
         },
         allocated: if header.is_in_use() {
             Allocation::Allocated
@@ -336,22 +427,17 @@ fn unallocated_runs(
 }
 
 impl<R: Read + Seek + Send> NtfsFs<R> {
-    /// True when the MFT record at `entry` is a symlink: it carries a
-    /// `$REPARSE_POINT` attribute (Windows symlinks/junctions) or its resident
-    /// unnamed `$DATA` starts with the ntfs-3g `IntxLNK` magic (Linux-created
-    /// symlinks). A read/parse miss degrades to `false` — the entry then reads
-    /// as a regular file rather than failing the whole listing.
-    fn is_symlink_record(&self, entry: u64) -> bool {
-        let Ok(rec) = self.read_record(entry) else {
-            return false;
-        };
-        let Ok(header) = MftRecordHeader::parse(&rec) else {
-            return false;
-        };
-        let Ok(attrs) = parse_attributes(&rec, header.first_attribute_offset as usize) else {
-            return false;
-        };
-        reparse_target(&rec, &attrs).is_some()
+    /// The POSIX node kind the MFT record at `entry` states, in either encoding
+    /// a Linux driver writes (Windows/WSL `$REPARSE_POINT` tags, or the ntfs-3g
+    /// Interix `$DATA` magics). `None` for an ordinary file.
+    ///
+    /// A read/parse miss degrades to `None` — the entry then reads as a regular
+    /// file rather than failing the whole listing.
+    fn special_kind_of_record(&self, entry: u64) -> Option<NodeKind> {
+        let rec = self.read_record(entry).ok()?;
+        let header = MftRecordHeader::parse(&rec).ok()?;
+        let attrs = parse_attributes(&rec, header.first_attribute_offset as usize).ok()?;
+        special_kind(&rec, &attrs)
     }
 }
 
@@ -426,12 +512,13 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
             .filter_map(|e| {
                 let file_ref = e.file_reference;
                 e.file_name.map(|fnm| {
-                    let kind = if fnm.flags & FN_FLAG_DIRECTORY != 0 {
-                        NodeKind::Dir
-                    } else if self.is_symlink_record(file_ref.record_number) {
-                        NodeKind::Symlink
-                    } else {
-                        NodeKind::File
+                    // Reparse point first, for the same reason as `build_meta`:
+                    // a directory symlink / junction sets the directory flag
+                    // while redirecting, and must not read as a plain `Dir`.
+                    let kind = match self.special_kind_of_record(file_ref.record_number) {
+                        Some(kind) => kind,
+                        None if fnm.flags & FN_FLAG_DIRECTORY != 0 => NodeKind::Dir,
+                        None => NodeKind::File,
                     };
                     Ok(DirEntry {
                         name: fnm.name.into_bytes(),

@@ -1,0 +1,93 @@
+# Windows-authored NTFS reparse fixture
+# generated Mon 08/24/2026  8:46:40.88
+
+Microsoft Windows [Version 10.0.26200.8875]
+
+## dir listing (note <SYMLINK>, <SYMLINKD>, <JUNCTION> tags)
+ Volume in drive W is CLASSICRP
+ Volume Serial Number is F406-CD91
+
+ Directory of W:\
+
+08/24/2026  08:46 AM    <SYMLINKD>     abs_dirlink [W:\realdir]
+08/24/2026  08:46 AM    <SYMLINK>      abs_link.txt [W:\target.txt]
+08/24/2026  08:46 AM                22 hardlink.txt
+08/24/2026  08:46 AM    <JUNCTION>     junction [W:\realdir]
+08/24/2026  08:46 AM    <DIR>          realdir
+08/24/2026  08:46 AM    <SYMLINKD>     rel_dirlink [realdir]
+08/24/2026  08:46 AM    <SYMLINK>      rel_link.txt [target.txt]
+08/24/2026  08:46 AM                22 target.txt
+               4 File(s)             44 bytes
+               4 Dir(s)      53,624,832 bytes free
+
+## fsutil reparsepoint query rel_link.txt
+Reparse Tag Value : 0xa000000c
+Tag value: Microsoft
+Tag value: Name Surrogate
+Tag value: Symbolic Link
+
+Reparse Data Length: 0x34      
+Reparse Data:
+0000:  14 00 14 00 00 00 14 00  01 00 00 00 74 00 61 00  ............t.a.
+0010:  72 00 67 00 65 00 74 00  2e 00 74 00 78 00 74 00  r.g.e.t...t.x.t.
+0020:  74 00 61 00 72 00 67 00  65 00 74 00 2e 00 74 00  t.a.r.g.e.t...t.
+0030:  78 00 74 00                                       x.t.
+
+## fsutil reparsepoint query abs_link.txt
+Reparse Tag Value : 0xa000000c
+Tag value: Microsoft
+Tag value: Name Surrogate
+Tag value: Symbolic Link
+
+Reparse Data Length: 0x48      
+Reparse Data:
+0000:  1a 00 22 00 00 00 1a 00  00 00 00 00 57 00 3a 00  ..".........W.:.
+0010:  5c 00 74 00 61 00 72 00  67 00 65 00 74 00 2e 00  \.t.a.r.g.e.t...
+0020:  74 00 78 00 74 00 5c 00  3f 00 3f 00 5c 00 57 00  t.x.t.\.?.?.\.W.
+0030:  3a 00 5c 00 74 00 61 00  72 00 67 00 65 00 74 00  :.\.t.a.r.g.e.t.
+0040:  2e 00 74 00 78 00 74 00                           ..t.x.t.
+
+## fsutil reparsepoint query rel_dirlink
+Reparse Tag Value : 0xa000000c
+Tag value: Microsoft
+Tag value: Name Surrogate
+Tag value: Symbolic Link
+
+Reparse Data Length: 0x28      
+Reparse Data:
+0000:  0e 00 0e 00 00 00 0e 00  01 00 00 00 72 00 65 00  ............r.e.
+0010:  61 00 6c 00 64 00 69 00  72 00 72 00 65 00 61 00  a.l.d.i.r.r.e.a.
+0020:  6c 00 64 00 69 00 72 00                           l.d.i.r.
+
+## fsutil reparsepoint query abs_dirlink
+Reparse Tag Value : 0xa000000c
+Tag value: Microsoft
+Tag value: Name Surrogate
+Tag value: Symbolic Link
+
+Reparse Data Length: 0x3c      
+Reparse Data:
+0000:  14 00 1c 00 00 00 14 00  00 00 00 00 57 00 3a 00  ............W.:.
+0010:  5c 00 72 00 65 00 61 00  6c 00 64 00 69 00 72 00  \.r.e.a.l.d.i.r.
+0020:  5c 00 3f 00 3f 00 5c 00  57 00 3a 00 5c 00 72 00  \.?.?.\.W.:.\.r.
+0030:  65 00 61 00 6c 00 64 00  69 00 72 00              e.a.l.d.i.r.
+
+## fsutil reparsepoint query junction
+Reparse Tag Value : 0xa0000003
+Tag value: Microsoft
+Tag value: Name Surrogate
+Tag value: Mount Point
+Substitue Name offset: 0
+Substitue Name length: 28
+Print Name offset:     30
+Print Name Length:     20
+Substitute Name:       \??\W:\realdir
+Print Name:            W:\realdir
+
+Reparse Data Length: 0x3c      
+Reparse Data:
+0000:  00 00 1c 00 1e 00 14 00  5c 00 3f 00 3f 00 5c 00  ........\.?.?.\.
+0010:  57 00 3a 00 5c 00 72 00  65 00 61 00 6c 00 64 00  W.:.\.r.e.a.l.d.
+0020:  69 00 72 00 00 00 57 00  3a 00 5c 00 72 00 65 00  i.r...W.:.\.r.e.
+0030:  61 00 6c 00 64 00 69 00  72 00 00 00              a.l.d.i.r...
+
