@@ -106,3 +106,82 @@ fixup against genuine on-disk bytes (doer-checker) rather than a self-encoded sy
 - **Ground truth:** ntfs-3g's own mount resolves the symlink to `../README.txt`; the same
   record is listed by 7-Zip as a symlink (34 bytes).
 - **Consumed by:** `core/tests/vfs_ntfs.rs` `symlink_surfaces_as_symlink_with_target`.
+
+### ntfs_all_node_types.zip — every non-regular node type, in both Linux encodings
+
+- **Source:** a 16 MiB NTFS volume authored with `mkntfs` (ntfs-3g 2022.10.3), then mounted
+  **twice** by ntfs-3g and populated once per mode, so the same five nodes exist in both
+  on-disk forms. A superset of `tiny.zip`'s tree (`README.txt`, `nested/file.txt`,
+  `nested/readme-link.txt -> ../README.txt`), so those assertions keep their ground truth.
+- **What each mode records** (`libntfs-3g/dir.c`, `include/ntfs-3g/layout.h:2450`):
+
+  | node | `interix/` (default) | `wsl/` (`-o special_files=wsl`) |
+  |---|---|---|
+  | `symlink` | `IntxLNK\x01` + UTF-16 target | `LX_SYMLINK` `0xA000001D` |
+  | `chardev` | `IntxCHR\x00` + major/minor | `LX_CHR` `0x80000025` |
+  | `blockdev` | `IntxBLK\x00` + major/minor | `LX_BLK` `0x80000026` |
+  | `fifo` | **zero-length `$DATA`, no magic** | `LX_FIFO` `0x80000024` |
+  | `socket` | **one-byte `$DATA`, no magic** | `AF_UNIX` `0x80000023` |
+
+  The two bold cells are a genuine format limitation: nothing on disk distinguishes an Interix
+  FIFO from an empty file, or a socket from a one-byte file. `dir.c`'s own comment reads
+  *"FIFO or regular file."* The tests assert `File` for those two rather than inferring a type
+  the volume never recorded.
+- **Generator command (verbatim), rootful container inside the podman VM:**
+  ```sh
+  dd if=/dev/zero of=ntfs_all_node_types.img bs=1M count=16
+  mkntfs -F -Q -L NODETYPES ntfs_all_node_types.img
+  ntfs-3g -o special_files=interix ntfs_all_node_types.img /mnt/ntfs
+  #   seed README.txt / nested/ / nested/readme-link.txt, then in interix/:
+  #   ln -s ../README.txt symlink; mknod chardev c 1 3; mknod blockdev b 7 0
+  #   mkfifo fifo; python3 -c "import socket;s=socket.socket(socket.AF_UNIX);s.bind('socket')"
+  umount /mnt/ntfs
+  ntfs-3g -o special_files=wsl ntfs_all_node_types.img /mnt/ntfs   # repeat in wsl/
+  ```
+  **`mknod` needs real `CAP_MKNOD`.** Rootless podman cannot create device nodes even with
+  `--privileged` — the capability is namespaced, and it fails on tmpfs too, which is the tell.
+  On macOS: `podman machine ssh 'sudo podman run --privileged --device /dev/fuse …'`.
+- **Size / MD5 (uncompressed image):** 16 777 216 bytes - `e6fe500d36b911e12f5bf7d705581a26`
+- **Ground truth:** ntfs-3g's own readback in each mode lists `b`, `c`, `p`, `s` and `l` for
+  the five nodes. Byte-level confirmation: `IntxLNK ×2, IntxCHR ×1, IntxBLK ×1`, and each WSL
+  tag ×3; **zero** occurrences of the classic `0xA000000C` / `0xA0000003` — no Linux tool
+  writes those, which is why `ntfs_windows_reparse.zip` exists.
+- **Classification:** Tier 2 — real tool output, ground truth from the driver's own readback,
+  scenario chosen here.
+- **Consumed by:** `core/tests/node_types.rs`.
+
+### ntfs_windows_reparse.zip — classic reparse points authored by Windows
+
+- **Source:** a 64 MiB VHD created and formatted by `diskpart` on **Windows 11
+  10.0.26200.8875**, populated with `mklink`, then detached; the NTFS partition (MBR type
+  `0x07`, LBA 128) extracted to a raw volume image. No Linux tool can create these tags —
+  ntfs-3g writes Interix or WSL forms, and the in-kernel `ntfs3` driver defines only
+  `MOUNT_POINT` and `SYMLINK` with no LX tags at all.
+- **Contents and Windows' own decode** (`fsutil reparsepoint query`, captured verbatim into
+  `win_reparse_truth.txt` at generation time):
+
+  | path | tag | `Flags` | `PathBuffer` at | substitute name |
+  |---|---|---|---|---|
+  | `rel_link.txt` | `0xa000000c` | `1` (RELATIVE) | `data + 12` | `target.txt` |
+  | `abs_link.txt` | `0xa000000c` | `0` | `data + 12` | `\??\W:\target.txt` |
+  | `rel_dirlink` | `0xa000000c` | `1` | `data + 12` | `realdir` |
+  | `abs_dirlink` | `0xa000000c` | `0` | `data + 12` | `\??\W:\realdir` |
+  | `junction` | `0xa0000003` | *(none)* | `data + 8` | `\??\W:\realdir` |
+  | `hardlink.txt` | — | — | — | not a reparse point (control) |
+
+  `rel_link.txt`'s reparse data length is `0x34` = 12 + 20 + 20, and `junction`'s is `0x3c`
+  = 8 + names: Microsoft's own tool confirming that a symlink carries a 4-byte `Flags` field
+  a junction does not.
+- **Generator script:** `make-ntfs-reparse-fixture.cmd`, run from an elevated `cmd.exe`
+  (symbolic links need `SeCreateSymbolicLinkPrivilege`; junctions do not).
+- **Size / MD5 (extracted volume):** 65 994 752 bytes - `4f2672e79358e15f9e2dfeced4e393d0`
+- **Classification:** Tier 2, at the strong end — neither the bytes nor the expected values
+  were authored here, but the scenario (which links exist) was chosen. Tier 1 would need a
+  real-world installation image, where the reparse points exist because Windows Setup made
+  them.
+- **Negative control:** reverting the `data + 12` symlink base makes
+  `windows_authored_reparse_points_match_fsutil` fail with `"xttarget.t"` — Windows stores the
+  *print* name first, so the bug yields a plausible-looking filename rather than the obvious
+  NUL-prefixed garbage a zero-offset synthetic fixture produces. That is the specific reason
+  this fixture earns its place alongside the synthetic ones.
+- **Consumed by:** `core/tests/windows_reparse_oracle.rs`.
