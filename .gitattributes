@@ -1,0 +1,9 @@
+# Byte-exact evidence fixtures: never let git translate line endings.
+#
+# Git's binary autodetection only scans the FIRST 8000 BYTES for a NUL, so a
+# compressed image whose first NUL falls past that window is classified as text
+# and has its LF bytes rewritten to CRLF on checkout. `core.autocrlf` defaults
+# to true on GitHub's windows-latest runners, which is how a fixture-backed test
+# fails on Windows only, while the code is provably correct.
+tests/data/** -text
+fuzz/corpus/** -text
