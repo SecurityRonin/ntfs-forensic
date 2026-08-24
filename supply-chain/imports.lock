@@ -23,8 +23,8 @@ user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
 
 [[publisher.forensic-vfs]]
-version = "0.7.0"
-when = "2026-07-20"
+version = "0.9.0"
+when = "2026-08-24"
 user-id = 347968
 user-login = "h4x0r"
 user-name = "Albert Hui"
@@ -58,8 +58,8 @@ user-login = "h4x0r"
 user-name = "Albert Hui"
 
 [[publisher.state-history-forensic]]
-version = "0.1.0"
-when = "2026-06-16"
+version = "0.2.1"
+when = "2026-08-06"
 user-id = 347968
 user-login = "h4x0r"
 user-name = "Albert Hui"
