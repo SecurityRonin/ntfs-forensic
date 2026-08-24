@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "ntfs-core"
-version = "0.9.7"
+version = "0.9.8"
 dependencies = [
  "bitflags 2.13.1",
  "chrono",
@@ -795,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "ntfs-forensic"
-version = "0.8.4"
+version = "0.8.5"
 dependencies = [
  "chrono",
  "forensicnomicon",
