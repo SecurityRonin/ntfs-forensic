@@ -4,6 +4,21 @@ All notable changes to `ntfs-core` (the reader) are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.7](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.6...ntfs-core-v0.9.7) - 2026-08-24
+
+### Added
+
+- *(vfs)* surface NTFS reparse-point and ntfs-3g symlinks
+
+### Documentation
+
+- *(vfs)* clarify IntxLNK version-byte handling; tidy
+
+### Fixed
+
+- *(vfs)* bound a decoded symlink target by the caller's cap
+- *(vfs)* read a symlink's PathBuffer past Flags, at data + 12
+
 ## [0.9.6](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.5...ntfs-core-v0.9.6) - 2026-07-22
 
 ### Added
