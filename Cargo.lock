@@ -468,9 +468,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "forensic-vfs"
-version = "0.7.0"
+version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "285cbb38f775a1c3c476e7e20bffea29eea6a62f73e0721957c04cb3867d1fa6"
+checksum = "ea33e9e6f4ad53900e9123b7a282c247b215379979bdc4f25ee76ea97e81ba24"
 dependencies = [
  "forensicnomicon-core",
  "state-history-forensic",
@@ -1225,9 +1225,12 @@ dependencies = [
 
 [[package]]
 name = "state-history-forensic"
-version = "0.1.0"
+version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "06d95f05c0dd49a5dfae0eb6cb6fae7bb3bd5c1f787300c94a3a5adecb44d98f"
+checksum = "dc4d5ce31ae7f3521c8f64584056d13b8dcc52c1f59d780f1eba667994109343"
+dependencies = [
+ "forensicnomicon-core",
+]
 
 [[package]]
 name = "strsim"
