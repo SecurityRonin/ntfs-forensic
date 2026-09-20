@@ -683,6 +683,61 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         Ok(out)
     }
 
+    /// File slack: the allocated bytes after end-of-file, within the run that
+    /// contains EOF.
+    ///
+    /// `None` is returned — rather than a zero-length run — for the three cases
+    /// where no slack physically exists, so a caller can tell "no tail" from
+    /// "a tail of nothing":
+    ///
+    /// - a **resident** stream, whose bytes live inside the MFT record and own
+    ///   no cluster;
+    /// - an allocation ending exactly at EOF (a cluster-aligned size);
+    /// - a **sparse** run at EOF, which has no backing clusters to hold slack.
+    ///
+    /// Only the tail of the run containing EOF is reported, because [`ByteRun`]
+    /// is contiguous. NTFS sizes the run list to `allocated_size`, so EOF falls
+    /// in the final run and that tail is the whole of the slack.
+    fn slack(&self, ino: FileId, stream: StreamId) -> VfsResult<Option<ByteRun>> {
+        let entry = entry_of(ino)?;
+        let name = stream_name(stream)?;
+        let rec = self.read_record(entry).map_err(map_err)?;
+        let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
+        let attrs =
+            parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
+
+        let Some(attr) = attrs
+            .iter()
+            .find(|a| a.type_code == attr_types::DATA && a.name.as_deref() == name)
+        else {
+            return Ok(None);
+        };
+        let real_size = match &attr.body {
+            AttributeBody::Resident { .. } => return Ok(None),
+            AttributeBody::NonResident { real_size, .. } => *real_size,
+        };
+
+        let runs = self.runs_by_record(entry, name).map_err(map_err)?;
+        let cluster = self.boot().cluster_size();
+        let mut consumed = 0u64;
+        for r in runs {
+            let len = r.length.saturating_mul(cluster);
+            if consumed.saturating_add(len) > real_size {
+                let Some(lcn) = r.lcn else {
+                    return Ok(None);
+                };
+                let into = real_size.saturating_sub(consumed);
+                return Ok(Some(ByteRun {
+                    image_offset: lcn.saturating_mul(cluster).saturating_add(into),
+                    len: len.saturating_sub(into),
+                    flags: RunFlags::default(),
+                }));
+            }
+            consumed = consumed.saturating_add(len);
+        }
+        Ok(None)
+    }
+
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let entry = entry_of(ino)?;
         // `Named(i)` indexes the NAMED streams in `data_streams` order. Resolving

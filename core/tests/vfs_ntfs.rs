@@ -961,3 +961,58 @@ fn a_singly_linked_file_reports_exactly_one_name() {
     assert_eq!(links.len(), 1, "expected one link, got {links:?}");
     assert_eq!(String::from_utf8_lossy(&links[0].name), "file1.txt");
 }
+
+// ── file slack ───────────────────────────────────────────────────────────────
+//
+// Oracle: The Sleuth Kit on the sample volume.
+//
+// ```text
+// $ fsstat -f ntfs partition.dd      # Sector Size: 512, Cluster Size: 512
+// $ istat  -f ntfs partition.dd 6    # $Bitmap
+//     Type: $DATA (128-4)  Non-Resident  size: 1792  init_size: 1792
+//     4758 4759 4760 4761            <- 4 clusters = 2048 bytes allocated
+// ```
+//
+// 2048 allocated - 1792 of file = 256 bytes of slack, beginning 256 bytes into
+// cluster 4761 → image offset 4761*512 + 256 = 2_437_888.
+
+#[test]
+fn file_slack_is_the_tail_of_the_last_allocated_cluster_tier1() {
+    let fs = open_real_volume();
+    let run = fs
+        .slack(FileId::NtfsRef { entry: 6, seq: 6 }, StreamId::Default)
+        .expect("slack query")
+        .expect("$Bitmap is 1792 bytes in 4 clusters, so it HAS slack");
+    assert_eq!(run.len, 256, "2048 allocated - 1792 real");
+    assert_eq!(
+        run.image_offset,
+        4761 * 512 + 256,
+        "slack begins inside cluster 4761 (TSK run list 4758-4761)"
+    );
+}
+
+#[test]
+fn a_resident_stream_has_no_slack() {
+    // CONTROL. file1.txt's $DATA is resident (TSK: "Resident size: 408"), so
+    // its bytes live inside the MFT record and no cluster tail exists. Slack
+    // must be None -- not a zero-length run, which would imply an allocated
+    // tail that happens to be empty.
+    let fs = open_real_volume();
+    assert_eq!(
+        fs.slack(FileId::NtfsRef { entry: 37, seq: 1 }, StreamId::Default)
+            .expect("slack query"),
+        None
+    );
+}
+
+#[test]
+fn a_cluster_aligned_stream_has_no_slack() {
+    // CONTROL. $MFT is 262144 bytes = exactly 512 clusters of 512, so the
+    // allocation ends precisely at EOF and there is nothing after it.
+    let fs = open_real_volume();
+    assert_eq!(
+        fs.slack(FileId::NtfsRef { entry: 0, seq: 1 }, StreamId::Default)
+            .expect("slack query"),
+        None
+    );
+}
