@@ -13,9 +13,9 @@ use std::io::{Read, Seek};
 
 use forensic_vfs::{
     Allocation, ByteRun, DeletedNode, DeletedStream, DirEntry, DirStream, ExtentStream, FileId,
-    FileSystem, FsKind, FsMeta, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags,
-    RunInfo, SectorSizes, SmallHex, StreamId, StreamInfo, StreamKind, TimeResolution, TimeSource,
-    TimeStamp, TimeZonePolicy, VfsError, VfsResult,
+    FileSystem, FsKind, FsMeta, HardLink, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc,
+    RunFlags, RunInfo, SectorSizes, SmallHex, StreamId, StreamInfo, StreamKind, TimeResolution,
+    TimeSource, TimeStamp, TimeZonePolicy, VfsError, VfsResult,
 };
 use forensicnomicon::ntfs::{attr_types, filename_namespace, mft_records};
 
@@ -594,6 +594,52 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
     /// a named one as [`StreamId::Named`] / [`StreamKind::NtfsAds`]. The two are
     /// deliberately different kinds: an ADS is not the file's contents, and
     /// flattening them would present one as the other.
+    /// Enumerate every directory entry that names this record.
+    ///
+    /// NTFS stores one `$FILE_NAME` attribute per name, each carrying its own
+    /// parent reference, so the link set is read directly from the record —
+    /// no directory walk.
+    ///
+    /// **DOS-namespace names are excluded.** An 8.3 alias is a second
+    /// `$FILE_NAME` for the *same* directory entry, not a second link: MFT 35
+    /// of the `LogFileParser` sample is a directory with `Links: 2` whose two
+    /// names are a Win32 long name and its alias under one parent, and NTFS
+    /// directories cannot be hard-linked at all. Counting attributes there
+    /// would manufacture a link the volume does not contain.
+    ///
+    /// A `$FILE_NAME` that fails to parse is surfaced as an error rather than
+    /// skipped: dropping it would report a corrupt name as one fewer link,
+    /// which is the absence-vs-unimplemented confusion ADR-0020 forbids.
+    fn hardlinks(&self, ino: FileId) -> VfsResult<Vec<HardLink>> {
+        let entry = entry_of(ino)?;
+        let rec = self.read_record(entry).map_err(map_err)?;
+        let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
+        let attrs =
+            parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
+
+        let mut out = Vec::new();
+        for a in attrs
+            .iter()
+            .filter(|a| a.type_code == attr_types::FILE_NAME)
+        {
+            let Some(content) = a.resident_content(&rec) else {
+                continue; // cov:unreachable: $FILE_NAME is resident by spec; a non-resident one cannot be reached from a well-formed record
+            };
+            let fname = FileName::parse(content).map_err(map_err)?;
+            if fname.is_dos_namespace() {
+                continue;
+            }
+            out.push(HardLink {
+                parent: FileId::NtfsRef {
+                    entry: fname.parent.record_number,
+                    seq: fname.parent.sequence,
+                },
+                name: fname.name.into_bytes(),
+            });
+        }
+        Ok(out)
+    }
+
     fn data_streams(&self, ino: FileId) -> VfsResult<Vec<StreamInfo>> {
         let entry = entry_of(ino)?;
         let rec = self.read_record(entry).map_err(map_err)?;

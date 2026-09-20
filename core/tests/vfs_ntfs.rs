@@ -862,3 +862,102 @@ fn an_enumerated_ads_is_readable_by_its_id_tier1() {
          rather than residual cluster contents"
     );
 }
+
+// ── hard links ───────────────────────────────────────────────────────────────
+//
+// Oracle: The Sleuth Kit, on the committed `ntfs_windows_reparse.img`:
+//
+// ```text
+// $ istat -f ntfs ntfs_windows_reparse.img 39
+//   Allocated File            Links: 2
+//   $FILE_NAME  Name: target.txt     Parent MFT Entry: 5  Sequence: 5
+//   $FILE_NAME  Name: hardlink.txt   Parent MFT Entry: 5  Sequence: 5
+// $ fls -f ntfs -r ntfs_windows_reparse.img
+//   r/r 39-128-1:  hardlink.txt
+//   r/r 39-128-1:  target.txt        <- one file, two names
+// ```
+
+/// The committed Windows-authored volume carrying `target.txt` hard-linked as
+/// `hardlink.txt` (provenance in `tests/data/README.md`).
+const REPARSE_ZIP: &[u8] = include_bytes!("../../tests/data/ntfs_windows_reparse.zip");
+
+fn open_reparse_volume() -> Arc<dyn FileSystem> {
+    let mut archive = zip::ZipArchive::new(Cursor::new(REPARSE_ZIP)).expect("open reparse zip");
+    let mut img = Vec::new();
+    archive
+        .by_name("ntfs_windows_reparse.img")
+        .expect("img present")
+        .read_to_end(&mut img)
+        .expect("read img");
+    Arc::new(NtfsFs::open(Cursor::new(img)).expect("open NTFS volume"))
+}
+
+#[test]
+fn hard_links_are_enumerated_with_their_parents_tier1() {
+    let fs = open_reparse_volume();
+    let links = fs
+        .hardlinks(FileId::NtfsRef { entry: 39, seq: 1 })
+        .expect("hardlinks");
+
+    let mut names: Vec<String> = links
+        .iter()
+        .map(|l| String::from_utf8_lossy(&l.name).into_owned())
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        vec!["hardlink.txt".to_string(), "target.txt".to_string()],
+        "TSK reports both names for MFT 39"
+    );
+    for l in &links {
+        assert_eq!(
+            l.parent,
+            FileId::NtfsRef { entry: 5, seq: 5 },
+            "both links live in the root (TSK: Parent MFT Entry 5, Sequence 5)"
+        );
+    }
+}
+
+#[test]
+fn a_dos_short_name_alias_is_not_reported_as_a_second_hard_link() {
+    // MUST-NOT-OVER-REPORT control. MFT 35 of the sample volume is a DIRECTORY
+    // with `Links: 2` and two $FILE_NAME attributes -- but they are a Win32 long
+    // name and its 8.3 DOS alias, both under parent 34, and `fls` lists ONE
+    // entry. NTFS directories cannot carry hard links at all, so counting
+    // $FILE_NAME attributes here would manufacture a link that does not exist.
+    //
+    // ```text
+    // $ istat -f ntfs partition.dd 35
+    //   Allocated Directory       Links: 2
+    //   $FILE_NAME Name: S-1-5-~1                                   Parent 34
+    //   $FILE_NAME Name: S-1-5-21-3071599738-1627302256-2937559092-1000  Parent 34
+    // $ fls -f ntfs -r partition.dd | grep 35-
+    //   + d/d 35-144-1:  S-1-5-21-3071599738-1627302256-2937559092-1000
+    // ```
+    let fs = open_real_volume();
+    let links = fs
+        .hardlinks(FileId::NtfsRef { entry: 35, seq: 1 })
+        .expect("hardlinks");
+    let names: Vec<String> = links
+        .iter()
+        .map(|l| String::from_utf8_lossy(&l.name).into_owned())
+        .collect();
+    assert_eq!(
+        names,
+        vec!["S-1-5-21-3071599738-1627302256-2937559092-1000".to_string()],
+        "the 8.3 alias must not be reported as a separate link, got {names:?}"
+    );
+}
+
+#[test]
+fn a_singly_linked_file_reports_exactly_one_name() {
+    // file1.txt is `Links: 1` per istat; the enumeration must still name it
+    // rather than return empty -- an empty result would read as "this file has
+    // no name", which is the ADR-0020 failure mode.
+    let fs = open_real_volume();
+    let links = fs
+        .hardlinks(FileId::NtfsRef { entry: 37, seq: 1 })
+        .expect("hardlinks");
+    assert_eq!(links.len(), 1, "expected one link, got {links:?}");
+    assert_eq!(String::from_utf8_lossy(&links[0].name), "file1.txt");
+}
