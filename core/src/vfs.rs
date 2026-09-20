@@ -14,8 +14,8 @@ use std::io::{Read, Seek};
 use forensic_vfs::{
     Allocation, ByteRun, DeletedNode, DeletedStream, DirEntry, DirStream, ExtentStream, FileId,
     FileSystem, FsKind, FsMeta, MacbTimes, NodeKind, NodeStream, ResidencyKind, RunAlloc, RunFlags,
-    RunInfo, SectorSizes, SmallHex, StreamId, TimeResolution, TimeSource, TimeStamp,
-    TimeZonePolicy, VfsError, VfsResult,
+    RunInfo, SectorSizes, SmallHex, StreamId, StreamInfo, StreamKind, TimeResolution, TimeSource,
+    TimeStamp, TimeZonePolicy, VfsError, VfsResult,
 };
 use forensicnomicon::ntfs::{attr_types, filename_namespace, mft_records};
 
@@ -582,9 +582,89 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         build_meta(entry, &rec)
     }
 
+    /// Every `$DATA` attribute on the record: the file's own contents plus each
+    /// alternate data stream, BY NAME.
+    ///
+    /// Without this an ADS was invisible through the VFS -- readable only by a
+    /// caller who already knew the name, since `stream_name` refuses to map an
+    /// index back to one. On NTFS that hid `Zone.Identifier`, the mark-of-the-web.
+    /// See ADR-0020.
+    ///
+    /// The unnamed `$DATA` is reported as [`StreamId::Default`] / [`StreamKind::NtfsData`];
+    /// a named one as [`StreamId::Named`] / [`StreamKind::NtfsAds`]. The two are
+    /// deliberately different kinds: an ADS is not the file's contents, and
+    /// flattening them would present one as the other.
+    fn data_streams(&self, ino: FileId) -> VfsResult<Vec<StreamInfo>> {
+        let entry = entry_of(ino)?;
+        let rec = self.read_record(entry).map_err(map_err)?;
+        let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
+        let attrs =
+            parse_attributes(&rec, header.first_attribute_offset as usize).map_err(map_err)?;
+
+        let mut out = Vec::new();
+        // `named` counts only the NAMED streams, so StreamId::Named(i) indexes
+        // the same sequence `read_at` walks. Counting every $DATA would shift
+        // every index by one whenever an unnamed stream is present.
+        let mut named = 0u16;
+        for a in attrs.iter().filter(|a| a.type_code == attr_types::DATA) {
+            let (size, residency) = match &a.body {
+                AttributeBody::Resident { content_length, .. } => (
+                    u64::from(*content_length),
+                    ResidencyKind::Resident {
+                        inline_len: *content_length,
+                    },
+                ),
+                AttributeBody::NonResident { real_size, .. } => {
+                    (*real_size, ResidencyKind::NonResident)
+                }
+            };
+            let (id, kind, name) = match &a.name {
+                None => (StreamId::Default, StreamKind::NtfsData, None),
+                Some(n) => {
+                    let id = StreamId::Named(named);
+                    named = named.saturating_add(1);
+                    (id, StreamKind::NtfsAds, Some(n.clone().into_bytes()))
+                }
+            };
+            out.push(StreamInfo {
+                id,
+                name,
+                size,
+                residency,
+                kind,
+            });
+        }
+        Ok(out)
+    }
+
     fn read_at(&self, ino: FileId, stream: StreamId, off: u64, buf: &mut [u8]) -> VfsResult<usize> {
         let entry = entry_of(ino)?;
-        let name = stream_name(stream)?;
+        // `Named(i)` indexes the NAMED streams in `data_streams` order. Resolving
+        // it back to the on-disk name here is what makes an enumerated stream
+        // readable; refusing it would mean advertising a handle we will not
+        // honour. `stream_name` still rejects the ids NTFS genuinely has no
+        // meaning for (xattr, resource fork, slack).
+        let owned;
+        let name = match stream {
+            StreamId::Named(idx) => {
+                let rec = self.read_record(entry).map_err(map_err)?;
+                let header = MftRecordHeader::parse(&rec).map_err(map_err)?;
+                let attrs = parse_attributes(&rec, header.first_attribute_offset as usize)
+                    .map_err(map_err)?;
+                let found = attrs
+                    .iter()
+                    .filter(|a| a.type_code == attr_types::DATA)
+                    .filter_map(|a| a.name.as_ref())
+                    .nth(idx as usize)
+                    .ok_or_else(|| VfsError::Unsupported {
+                        layer: "ntfs stream index",
+                        scheme: format!("named stream {idx} of record {entry}"),
+                    })?;
+                owned = found.clone();
+                Some(owned.as_str())
+            }
+            other => stream_name(other)?,
+        };
         // Cap the materialized read at the window end, so a huge stream is never
         // pulled wholesale to satisfy a small windowed read.
         let cap = off.saturating_add(buf.len() as u64);

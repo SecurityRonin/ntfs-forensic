@@ -21,7 +21,7 @@ use std::sync::Arc;
 
 use forensic_vfs::{
     Allocation, DirEntry, FileId, FileSystem, FsKind, NodeKind, ResidencyKind, RunAlloc,
-    SectorSizes, StreamId, TimeZonePolicy,
+    SectorSizes, StreamId, StreamKind, TimeZonePolicy,
 };
 use ntfs_core::NtfsFs;
 
@@ -749,5 +749,116 @@ fn the_intact_volume_does_report_a_label() {
     assert!(
         fs.volume_label().is_some(),
         "precondition: the intact sample volume carries a label"
+    );
+}
+
+/// TIER-1: alternate data streams must be ENUMERABLE, not merely readable by
+/// someone who already knows the name.
+///
+/// `ntfs-core` could always read an ADS — `read_named_stream(path, stream)` has
+/// a passing test against `Zone.Identifier`. The VFS adapter had no
+/// `data_streams`, and `stream_name(StreamId::Named(n))` **refused**, with the
+/// comment *"a named-stream id cannot be mapped back to its ADS name"*. So
+/// through the VFS and any mount, an ADS was invisible and unenumerable — and on
+/// NTFS that includes `Zone.Identifier`, the mark-of-the-web.
+///
+/// Same shape as the symlink PRs an outside contributor sent us: the reader can
+/// decode it, the adapter never asks. See ADR-0020.
+///
+/// **Tier 1 on both axes.** The artifact is third-party (the 2013
+/// `LogFileParser` sample volume, not minted here) and the ground truth comes
+/// from an independent implementation — The Sleuth Kit:
+///
+/// ```text
+/// $ istat -f ntfs partition.dd 8          # $BadClus
+/// Type: $DATA (128-2)   Name: N/A    Resident       size: 0
+/// Type: $DATA (128-1)   Name: $Bad   Non-Resident   size: 7339520
+/// ```
+///
+/// `$BadClus` is the canonical named-stream case: an empty unnamed `$DATA` plus
+/// a large non-resident `$Bad` stream covering the volume's bad clusters.
+#[test]
+fn alternate_data_streams_are_enumerable_tier1() {
+    let fs = open_real_volume();
+    let id = FileId::NtfsRef { entry: 8, seq: 0 };
+
+    let streams = fs.data_streams(id).expect("data_streams must not error");
+
+    // Non-zero baseline before any per-stream assertion: an empty list would
+    // satisfy every `find` below vacuously, which is precisely how this went
+    // unnoticed until a capability audit.
+    assert_eq!(
+        streams.len(),
+        2,
+        "TSK reports two $DATA attributes on $BadClus; got {streams:?}"
+    );
+
+    let unnamed = streams
+        .iter()
+        .find(|s| s.name.is_none())
+        .expect("the unnamed $DATA stream must be listed");
+    assert_eq!(unnamed.id, StreamId::Default);
+    assert_eq!(unnamed.size, 0, "TSK: unnamed $DATA is resident, size 0");
+
+    let bad = streams
+        .iter()
+        .find(|s| s.name.as_deref() == Some(&b"$Bad"[..]))
+        .expect("the $Bad named stream must be listed BY NAME, not by index");
+    assert_eq!(
+        bad.size, 7_339_520,
+        "TSK: $Bad is non-resident, size 7339520"
+    );
+    assert_eq!(
+        bad.kind,
+        StreamKind::NtfsAds,
+        "a named $DATA attribute is an alternate data stream, and must not be \
+         flattened into the same kind as the file's own contents"
+    );
+    assert_eq!(
+        bad.residency,
+        ResidencyKind::NonResident,
+        "TSK reports $Bad Non-Resident -- residency is a fact about where the \
+         bytes are and must survive"
+    );
+}
+
+/// TIER-1: a stream this adapter ENUMERATES must also be READABLE by the id it
+/// handed out.
+///
+/// `data_streams` now reports `$Bad` as `StreamId::Named(0)`, but `read_at`
+/// refused every non-default id — so the adapter advertised a handle it would
+/// not honour. Enumerable-but-unreadable is its own inconsistency, and half a
+/// fix is how the original defect survived.
+///
+/// Ground truth from The Sleuth Kit:
+///
+/// ```text
+/// Type: $DATA (128-1)  Name: $Bad  Non-Resident  size: 7339520  init_size: 0
+/// ```
+///
+/// `init_size: 0` means the stream is allocated but entirely UNINITIALISED, so
+/// a correct reader returns zeros — not an error, and not whatever bytes happen
+/// to sit in those clusters. `icat -f ntfs … 8-128-1` likewise yields nothing.
+#[test]
+fn an_enumerated_ads_is_readable_by_its_id_tier1() {
+    let fs = open_real_volume();
+    let id = FileId::NtfsRef { entry: 8, seq: 0 };
+
+    let streams = fs.data_streams(id).expect("data_streams");
+    let bad = streams
+        .iter()
+        .find(|s| s.name.as_deref() == Some(&b"$Bad"[..]))
+        .expect("$Bad must be enumerated");
+
+    let mut buf = [0u8; 512];
+    let n = fs
+        .read_at(id, bad.id, 0, &mut buf)
+        .expect("an id this adapter handed out must be readable");
+
+    assert_eq!(n, buf.len(), "a 7 MiB stream must fill a 512-byte request");
+    assert!(
+        buf.iter().all(|b| *b == 0),
+        "TSK reports init_size 0, so an uninitialised stream reads as zeros \
+         rather than residual cluster contents"
     );
 }
