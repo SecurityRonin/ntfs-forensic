@@ -76,7 +76,7 @@ pub use logfile::{
 pub use lznt1::decompress;
 pub use mft::{MftData, MftEntry};
 pub use mftmirr::{compare_mft_mirror, MirrorComparison};
-pub use record::{apply_fixup, MftRecordHeader};
+pub use record::{apply_fixup, MftRecordHeader, FIXUP_STRIDE};
 pub use refs::{RefsAnalyzer, RefsFileId, RefsRecord};
 pub use rewind::{EntryInfo, EntryKey, RecordSource, ResolvedRecord, RewindEngine};
 pub use runlist::{decode as decode_runlist, Run};

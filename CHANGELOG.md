@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `NtfsFs` applied update-sequence fixups at the boot sector's
+  `bytes_per_sector` stride. NTFS fixes up every 512 bytes of a record whatever
+  the sector size, so every record on a 4Kn volume failed with
+  `BadUpdateSequence("fixup sectors exceed record size")` and the volume would
+  not open. `record::FIXUP_STRIDE` (512) is now used for MFT records, INDX
+  buffers and attribute-list extension records (#18).
+
 ## [ntfs-core 0.7.1 / ntfs-forensic 0.6.1] — 2026-06-09
 
 ### Docs

@@ -120,10 +120,18 @@ impl MftRecordHeader {
     }
 }
 
+/// The update-sequence stride: NTFS protects every 512 bytes of a `FILE` or
+/// `INDX` record regardless of the volume's sector size (ntfs-3g `mst.c`
+/// `NTFS_BLOCK_SIZE`, Linux `fs/ntfs3/record.c` `SECTOR_SIZE`). A 4Kn volume
+/// with 4096-byte records therefore carries nine USA entries, not two.
+pub const FIXUP_STRIDE: usize = 512;
+
 /// Apply the NTFS update-sequence-array fixup to a raw record buffer in place.
 ///
-/// Verifies that each protected sector's last two bytes equal the USN, then
-/// restores the displaced original bytes from the USA.
+/// Verifies that each protected block's last two bytes equal the USN, then
+/// restores the displaced original bytes from the USA. On-disk records use
+/// [`FIXUP_STRIDE`]; `sector_size` is the stride and exists for callers that
+/// parse records from other layouts.
 ///
 /// # Errors
 ///
