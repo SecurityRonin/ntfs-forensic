@@ -1433,4 +1433,103 @@ mod tests {
         let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(fs.directory_entries(&rec).is_err());
     }
+
+    // ── 4Kn volumes ──────────────────────────────────────────────────────────
+    // NTFS fixes up every 512 bytes of a record whatever the sector size
+    // (ntfs-3g mst.c NTFS_BLOCK_SIZE): a 4096-byte record on a 4Kn volume
+    // carries nine USA entries, not two.
+
+    const SECTOR_4KN: usize = 4096;
+    const REC_4KN: usize = 4096;
+    const FIXUP_STRIDE: usize = 512;
+
+    fn build_boot_4kn() -> [u8; 512] {
+        let mut b = [0u8; 512];
+        b[3..11].copy_from_slice(b"NTFS    ");
+        b[0x0B..0x0D].copy_from_slice(&(SECTOR_4KN as u16).to_le_bytes());
+        b[0x0D] = 1; // one 4096-byte sector per cluster
+        b[0x30..0x38].copy_from_slice(&MFT_LCN.to_le_bytes());
+        b[0x38..0x40].copy_from_slice(&(MFT_LCN + 100).to_le_bytes());
+        b[0x40] = 0xF4; // -12 ⇒ 2^12 = 4096-byte records
+        b[0x44] = 0x01;
+        b[510] = 0x55;
+        b[511] = 0xAA;
+        b
+    }
+
+    /// A 4096-byte FILE record fixup-encoded at the 512-byte stride.
+    fn build_record_4kn(flags: u16, attrs: &[u8]) -> Vec<u8> {
+        let mut r = vec![0u8; REC_4KN];
+        r[0..4].copy_from_slice(b"FILE");
+        let usa_offset = 0x30u16;
+        let usa_count = (REC_4KN / FIXUP_STRIDE + 1) as u16; // 9
+        r[0x04..0x06].copy_from_slice(&usa_offset.to_le_bytes());
+        r[0x06..0x08].copy_from_slice(&usa_count.to_le_bytes());
+        let first_attr = 0x48usize; // past the 18-byte USA, 8-aligned
+        r[0x14..0x16].copy_from_slice(&(first_attr as u16).to_le_bytes());
+        r[0x16..0x18].copy_from_slice(&flags.to_le_bytes());
+        r[0x18..0x1C].copy_from_slice(&((first_attr + attrs.len() + 4) as u32).to_le_bytes());
+        r[0x1C..0x20].copy_from_slice(&(REC_4KN as u32).to_le_bytes());
+        r[first_attr..first_attr + attrs.len()].copy_from_slice(attrs);
+        r[first_attr + attrs.len()..first_attr + attrs.len() + 4]
+            .copy_from_slice(&attr_types::END.to_le_bytes());
+        let usn = 0x0001u16;
+        let uo = usa_offset as usize;
+        r[uo..uo + 2].copy_from_slice(&usn.to_le_bytes());
+        for i in 0..(usa_count as usize - 1) {
+            let tail = (i + 1) * FIXUP_STRIDE - 2;
+            let orig = [r[tail], r[tail + 1]];
+            let usa_pos = uo + 2 + i * 2;
+            r[usa_pos..usa_pos + 2].copy_from_slice(&orig);
+            r[tail..tail + 2].copy_from_slice(&usn.to_le_bytes());
+        }
+        r
+    }
+
+    /// A 4Kn volume: boot, `$MFT`, root, and one resident file.
+    fn build_volume_4kn() -> Cursor<Vec<u8>> {
+        let num_records = 8u64; // one record per 4096-byte cluster
+        let total_clusters = MFT_LCN + num_records;
+        let mut vol = vec![0u8; total_clusters as usize * SECTOR_4KN];
+        vol[0..512].copy_from_slice(&build_boot_4kn());
+
+        let runs = [0x11u8, num_records as u8, MFT_LCN as u8, 0x00];
+        let rec0 = build_record_4kn(
+            0x0001,
+            &nonresident_data(&runs, num_records * SECTOR_4KN as u64),
+        );
+        let rec5 = build_record_4kn(
+            0x0003,
+            &index_root(&[index_entry(6, "test.txt"), index_end()]),
+        );
+        let mut file_attrs = Vec::new();
+        file_attrs.extend_from_slice(&attr_resident(
+            attr_types::STANDARD_INFORMATION,
+            None,
+            &[0u8; 0x30],
+        ));
+        file_attrs.extend_from_slice(&attr_resident(
+            attr_types::FILE_NAME,
+            None,
+            &fname_content(5, "test.txt"),
+        ));
+        file_attrs.extend_from_slice(&resident_data(b"4kn"));
+        let rec6 = build_record_4kn(0x0001, &file_attrs);
+
+        let mft_off = MFT_LCN as usize * SECTOR_4KN;
+        for (idx, rec) in [(0usize, &rec0), (5, &rec5), (6, &rec6)] {
+            let o = mft_off + idx * REC_4KN;
+            vol[o..o + rec.len()].copy_from_slice(rec);
+        }
+        Cursor::new(vol)
+    }
+
+    #[test]
+    fn opens_4kn_volume_with_512_byte_fixup_stride() {
+        let fs = NtfsFs::open(build_volume_4kn()).unwrap();
+        assert_eq!(fs.boot().bytes_per_sector, 4096);
+        assert_eq!(fs.boot().mft_record_size, 4096);
+        assert_eq!(fs.resolve_path("\\test.txt").unwrap(), 6);
+        assert_eq!(fs.read_file("\\test.txt").unwrap(), b"4kn");
+    }
 }
