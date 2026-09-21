@@ -1433,4 +1433,79 @@ mod tests {
         let fs = NtfsFs::open(build_volume()).unwrap();
         assert!(fs.directory_entries(&rec).is_err());
     }
+
+    /// A volume whose record 6 carries a **resident** `$DATA` beside an
+    /// `$ATTRIBUTE_LIST` that cannot be parsed (first entry declares length 0,
+    /// below `ENTRY_MIN`).
+    ///
+    /// This is the input that separates `slack`'s resident short-circuit from
+    /// the fall-through: `runs_by_record` calls `gather_records`, which follows
+    /// the `$ATTRIBUTE_LIST` and fails here, so without the short-circuit the
+    /// query returns an error instead of the correct answer.
+    #[cfg(feature = "vfs")]
+    fn build_volume_resident_data_broken_attrlist() -> Cursor<Vec<u8>> {
+        const NUM_RECORDS: usize = 8;
+        let mft_clusters = (NUM_RECORDS * REC / CLUSTER) as u64;
+        let total_clusters = MFT_LCN + mft_clusters + 2;
+        let mut vol = vec![0u8; total_clusters as usize * CLUSTER];
+        vol[0..512].copy_from_slice(&build_boot());
+
+        let runs = [0x11u8, mft_clusters as u8, MFT_LCN as u8, 0x00];
+        let rec0 = build_record(
+            0x0001,
+            &nonresident_data(&runs, mft_clusters * CLUSTER as u64),
+        );
+
+        let rec5 = build_record(0x0003, &index_root(&[index_entry(6, "resident.txt")]));
+
+        // 32 zero bytes: entry_length at +0x04 reads 0, which is below
+        // ENTRY_MIN, so attribute_list::parse returns BadAttributeList.
+        let broken_attrlist = [0u8; 32];
+        let mut a6 = Vec::new();
+        a6.extend_from_slice(&attr_resident(
+            attr_types::ATTRIBUTE_LIST,
+            None,
+            &broken_attrlist,
+        ));
+        a6.extend_from_slice(&resident_data(b"resident bytes, no cluster tail"));
+        let rec6 = build_record(0x0001, &a6);
+
+        let mft_off = MFT_LCN as usize * CLUSTER;
+        let mut place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
+            let o = mft_off + idx * REC;
+            vol[o..o + rec.len()].copy_from_slice(rec);
+        };
+        place(&mut vol, 0, &rec0);
+        place(&mut vol, 5, &rec5);
+        place(&mut vol, 6, &rec6);
+        Cursor::new(vol)
+    }
+
+    /// The resident short-circuit in `slack` is load-bearing, not decorative.
+    ///
+    /// Record 6's `$DATA` is resident, so the correct answer is "no slack".
+    /// Reaching that answer by falling through to the run list would first call
+    /// `gather_records`, which follows the broken `$ATTRIBUTE_LIST` and fails —
+    /// turning a definite `None` into an error about an attribute list that has
+    /// no bearing on whether a resident stream has a cluster tail.
+    #[cfg(feature = "vfs")]
+    #[test]
+    fn slack_on_a_resident_stream_does_not_depend_on_the_attribute_list() {
+        use forensic_vfs::{FileId, FileSystem, StreamId};
+
+        let fs = NtfsFs::open(build_volume_resident_data_broken_attrlist()).unwrap();
+
+        // Control: the broken $ATTRIBUTE_LIST really does break the run-list
+        // path, so the assertion below cannot pass by accident.
+        assert!(
+            fs.runs_by_record(6, None).is_err(),
+            "fixture is wrong: the attribute list must fail to parse"
+        );
+
+        assert_eq!(
+            fs.slack(FileId::NtfsRef { entry: 6, seq: 1 }, StreamId::Default)
+                .expect("resident slack must not surface the attribute-list error"),
+            None
+        );
+    }
 }
