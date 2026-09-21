@@ -4,6 +4,18 @@ All notable changes to `ntfs-core` (the reader) are documented here. The format
 follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.9](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.8...ntfs-core-v0.9.9) - 2026-09-21
+
+### Added
+
+- *(vfs)* report NTFS file slack, distinguishing "no tail" from "empty tail"
+- *(vfs)* enumerate NTFS hard links, excluding 8.3 aliases
+- *(vfs)* enumerate NTFS alternate data streams, and make them readable
+
+### Fixed
+
+- *(clippy)* the place closure does not need to be mutable
+
 ## [0.9.8](https://github.com/SecurityRonin/ntfs-forensic/compare/ntfs-core-v0.9.7...ntfs-core-v0.9.8) - 2026-08-24
 
 ### Added
