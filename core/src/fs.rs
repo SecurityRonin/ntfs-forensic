@@ -17,7 +17,7 @@ use crate::boot::BootSector;
 use crate::data::read_attribute_value;
 use crate::error::{NtfsError, Result};
 use crate::index::{parse_index_buffer, IndexEntry, IndexRoot};
-use crate::record::{apply_fixup, MftRecordHeader};
+use crate::record::{apply_fixup, MftRecordHeader, FIXUP_STRIDE};
 use crate::runlist::{self, Run};
 
 /// A read-only NTFS filesystem over a seekable volume.
@@ -51,7 +51,7 @@ impl<R: Read + Seek> NtfsFs<R> {
         reader.seek(SeekFrom::Start(boot.mft_byte_offset()))?;
         let mut rec0 = vec![0u8; boot.mft_record_size as usize];
         reader.read_exact(&mut rec0)?;
-        apply_fixup(&mut rec0, boot.bytes_per_sector as usize)?;
+        apply_fixup(&mut rec0, FIXUP_STRIDE)?;
         let mft_runs = bootstrap_mft_runs(&mut reader, &rec0, &boot)?;
 
         Ok(NtfsFs {
@@ -98,7 +98,7 @@ impl<R: Read + Seek> NtfsFs<R> {
                 rec_size,
             )?
         };
-        apply_fixup(&mut buf, self.boot.bytes_per_sector as usize)?;
+        apply_fixup(&mut buf, FIXUP_STRIDE)?;
         Ok(buf)
     }
 
@@ -140,8 +140,7 @@ impl<R: Read + Seek> NtfsFs<R> {
                 while off + irs <= data.len() {
                     if &data[off..off + 4] == b"INDX" {
                         let mut buf = data[off..off + irs].to_vec();
-                        let entries =
-                            parse_index_buffer(&mut buf, irs, self.boot.bytes_per_sector as usize)?;
+                        let entries = parse_index_buffer(&mut buf, irs, FIXUP_STRIDE)?;
                         out.extend(entries.into_iter().filter(|e| e.file_name.is_some()));
                     }
                     off += irs;
@@ -448,7 +447,7 @@ fn bootstrap_mft_runs<R: Read + Seek>(
             .checked_mul(rec_size)
             .ok_or(NtfsError::BadRunlist("record offset overflow"))?;
         let mut ext = read_virtual(reader, &runs, boot.cluster_size(), virt, rec_size)?;
-        apply_fixup(&mut ext, boot.bytes_per_sector as usize)?;
+        apply_fixup(&mut ext, FIXUP_STRIDE)?;
         for a in record_attributes(&ext)? {
             let AttributeBody::NonResident { start_vcn, .. } = a.body else {
                 continue;
@@ -1441,8 +1440,6 @@ mod tests {
 
     const SECTOR_4KN: usize = 4096;
     const REC_4KN: usize = 4096;
-    const FIXUP_STRIDE: usize = 512;
-
     fn build_boot_4kn() -> [u8; 512] {
         let mut b = [0u8; 512];
         b[3..11].copy_from_slice(b"NTFS    ");
