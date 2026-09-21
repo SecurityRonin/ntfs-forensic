@@ -1471,7 +1471,7 @@ mod tests {
         let rec6 = build_record(0x0001, &a6);
 
         let mft_off = MFT_LCN as usize * CLUSTER;
-        let mut place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
+        let place = |vol: &mut [u8], idx: usize, rec: &[u8]| {
             let o = mft_off + idx * REC;
             vol[o..o + rec.len()].copy_from_slice(rec);
         };
