@@ -680,6 +680,7 @@ mod tests {
                 allocated_size: 512,
                 real_size: 512,
                 initialized_size: 512,
+                compressed_size: None,
             },
         };
         let record = vec![0u8; 0x48];
@@ -710,6 +711,7 @@ mod tests {
                 allocated_size: 512,
                 real_size: 512,
                 initialized_size: 512,
+                compressed_size: None,
             },
         };
         let record = vec![0u8; 1];

@@ -384,8 +384,129 @@ mod tests {
                 allocated_size: 0x8000,
                 real_size: 0x7A00,
                 initialized_size: 0x7A00,
+                compressed_size: None,
             }
         );
+    }
+
+    /// Build an unnamed non-resident `$DATA` whose header is `header_len` bytes,
+    /// so its runlist starts there, with the given `flags` and compression unit.
+    /// When `header_len` is 0x48, `compressed_size` is written at 0x40.
+    fn nonresident_with_header(
+        header_len: usize,
+        flags: u16,
+        compression_unit: u16,
+        compressed_size: u64,
+    ) -> Vec<u8> {
+        let runs = [0x21u8, 0x10, 0x00, 0x10, 0x00];
+        let length = align8(header_len + runs.len());
+        let mut a = vec![0u8; length];
+        a[o::TYPE..o::TYPE + 4].copy_from_slice(&attr_types::DATA.to_le_bytes());
+        a[o::LENGTH..o::LENGTH + 4].copy_from_slice(&(length as u32).to_le_bytes());
+        a[o::NON_RESIDENT] = 1;
+        a[o::NAME_OFFSET..o::NAME_OFFSET + 2].copy_from_slice(&(header_len as u16).to_le_bytes());
+        a[o::FLAGS..o::FLAGS + 2].copy_from_slice(&flags.to_le_bytes());
+        a[o::NR_LAST_VCN..o::NR_LAST_VCN + 8].copy_from_slice(&15u64.to_le_bytes());
+        a[o::NR_RUNS_OFFSET..o::NR_RUNS_OFFSET + 2]
+            .copy_from_slice(&(header_len as u16).to_le_bytes());
+        a[o::NR_COMPRESSION_UNIT..o::NR_COMPRESSION_UNIT + 2]
+            .copy_from_slice(&compression_unit.to_le_bytes());
+        a[o::NR_ALLOCATED_SIZE..o::NR_ALLOCATED_SIZE + 8]
+            .copy_from_slice(&0x1_0000u64.to_le_bytes());
+        a[o::NR_REAL_SIZE..o::NR_REAL_SIZE + 8].copy_from_slice(&0xF000u64.to_le_bytes());
+        a[o::NR_INITIALIZED_SIZE..o::NR_INITIALIZED_SIZE + 8]
+            .copy_from_slice(&0xF000u64.to_le_bytes());
+        if header_len >= 0x48 {
+            a[0x40..0x48].copy_from_slice(&compressed_size.to_le_bytes());
+        }
+        a[header_len..header_len + runs.len()].copy_from_slice(&runs);
+        a
+    }
+
+    #[test]
+    fn compressed_and_sparse_attributes_report_compressed_size() {
+        // A 0x48-byte header: 0x40 holds the bytes the stream occupies on disk,
+        // here 3 clusters of a 16-cluster (64 KiB) compression unit.
+        for flags in [flag::COMPRESSED, flag::SPARSE] {
+            let attr = nonresident_with_header(0x48, flags, 4, 0x3000);
+            let rec = record_with(0x38, &[attr]);
+            let attrs = parse_attributes(&rec, 0x38).unwrap();
+            let a = &attrs[0];
+            assert_eq!(a.compressed_size(), Some(0x3000), "flags {flags:#06x}");
+            assert!(matches!(
+                a.body,
+                AttributeBody::NonResident {
+                    runs_offset: 0x48,
+                    allocated_size: 0x1_0000,
+                    compressed_size: Some(0x3000),
+                    ..
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn compressed_attribute_with_short_header_has_no_compressed_size() {
+        // XP wrote compressed attributes with a compression unit of 0 and a
+        // 0x40-byte header: 0x40 is the first runlist byte, not a size.
+        let attr = nonresident_with_header(0x40, flag::COMPRESSED, 0, 0);
+        let rec = record_with(0x38, &[attr]);
+        let attrs = parse_attributes(&rec, 0x38).unwrap();
+        assert!(attrs[0].is_compressed());
+        assert_eq!(attrs[0].compressed_size(), None);
+    }
+
+    #[test]
+    fn uncompressed_named_attribute_has_no_compressed_size() {
+        // Named and uncompressed: the name sits at 0x40 and the runlist at 0x48,
+        // so the runlist offset alone must not select the field.
+        let runs = [0x21u8, 0x08, 0x00, 0x10, 0x00];
+        let attr = nonresident(
+            attr_types::DATA,
+            Some("ads"),
+            0,
+            0,
+            7,
+            0x8000,
+            0x7A00,
+            0x7A00,
+            &runs,
+        );
+        let rec = record_with(0x38, &[attr]);
+        let attrs = parse_attributes(&rec, 0x38).unwrap();
+        assert!(matches!(
+            attrs[0].body,
+            AttributeBody::NonResident {
+                runs_offset: 0x48,
+                ..
+            }
+        ));
+        assert_eq!(attrs[0].compressed_size(), None);
+    }
+
+    #[test]
+    fn resident_attribute_has_no_compressed_size() {
+        let attr = resident(attr_types::DATA, None, flag::COMPRESSED, b"inline");
+        let rec = record_with(0x38, &[attr]);
+        assert_eq!(
+            parse_attributes(&rec, 0x38).unwrap()[0].compressed_size(),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_compressed_size_past_attribute() {
+        // Compressed, runlist declared at 0x48, but the attribute is only 0x40
+        // bytes long: the size field is not there to read.
+        let mut attr = header(attr_types::DATA, 0x40, true);
+        attr[o::FLAGS..o::FLAGS + 2].copy_from_slice(&flag::COMPRESSED.to_le_bytes());
+        attr[o::NR_RUNS_OFFSET..o::NR_RUNS_OFFSET + 2].copy_from_slice(&0x48u16.to_le_bytes());
+        let rec = record_with(0, &[attr]);
+        assert!(matches!(
+            parse_attributes(&rec, 0),
+            Err(NtfsError::BadAttribute { detail, .. })
+                if detail == "compressed size runs past attribute"
+        ));
     }
 
     /// A 16-byte header with a custom declared `length` and resident flag, used
