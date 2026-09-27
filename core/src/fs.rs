@@ -572,14 +572,21 @@ mod tests {
         b
     }
 
-    /// Wrap attribute bytes into a fixup-encoded FILE record.
+    /// Wrap attribute bytes into a fixup-encoded FILE record at sequence 1, the
+    /// sequence every [`attrlist_entry`] reference names.
     fn build_record(flags: u16, attrs: &[u8]) -> Vec<u8> {
+        build_record_seq(flags, 1, attrs)
+    }
+
+    /// Like [`build_record`] with an explicit sequence number.
+    fn build_record_seq(flags: u16, sequence: u16, attrs: &[u8]) -> Vec<u8> {
         let mut r = vec![0u8; REC];
         r[0..4].copy_from_slice(b"FILE");
         let usa_offset = 0x30u16;
         let usa_count = (REC / SECTOR + 1) as u16;
         r[0x04..0x06].copy_from_slice(&usa_offset.to_le_bytes());
         r[0x06..0x08].copy_from_slice(&usa_count.to_le_bytes());
+        r[0x10..0x12].copy_from_slice(&sequence.to_le_bytes());
         let first_attr = 0x38usize;
         r[0x14..0x16].copy_from_slice(&(first_attr as u16).to_le_bytes());
         r[0x16..0x18].copy_from_slice(&flags.to_le_bytes());
@@ -708,6 +715,143 @@ mod tests {
         e[0x10..0x18].copy_from_slice(&((1u64 << 48) | record).to_le_bytes()); // base ref
         e[0x18..0x1A].copy_from_slice(&attr_id.to_le_bytes());
         e
+    }
+
+    /// Like [`attrlist_entry`] but naming `record` at `sequence`.
+    fn attrlist_entry_seq(type_code: u32, record: u64, sequence: u16) -> Vec<u8> {
+        let mut e = attrlist_entry(type_code, record, 0);
+        e[0x10..0x18].copy_from_slice(&((u64::from(sequence) << 48) | record).to_le_bytes());
+        e
+    }
+
+    /// [`build_volume`] with frag.txt rebuilt: base record 9 with `base`
+    /// (flags, sequence) and `list` as its `$ATTRIBUTE_LIST`, and extension
+    /// record 10 with `extension` (flags, sequence) holding "fragmented!".
+    fn volume_with_frag(
+        base: (u16, u16),
+        list: &[Vec<u8>],
+        extension: (u16, u16),
+    ) -> NtfsFs<Cursor<Vec<u8>>> {
+        let mut a9 = Vec::new();
+        a9.extend_from_slice(&attr_resident(
+            attr_types::STANDARD_INFORMATION,
+            None,
+            &[0u8; 0x30],
+        ));
+        a9.extend_from_slice(&attr_resident(
+            attr_types::FILE_NAME,
+            None,
+            &fname_content(5, "frag.txt"),
+        ));
+        a9.extend_from_slice(&attr_resident(
+            attr_types::ATTRIBUTE_LIST,
+            None,
+            &list.concat(),
+        ));
+        let rec9 = build_record_seq(base.0, base.1, &a9);
+        let rec10 = build_record_seq(extension.0, extension.1, &resident_data(b"fragmented!"));
+        let mut vol = build_volume().into_inner();
+        let mft_off = MFT_LCN as usize * CLUSTER;
+        for (idx, rec) in [(9, &rec9), (10, &rec10)] {
+            let o = mft_off + idx * REC;
+            vol[o..o + REC].copy_from_slice(rec);
+        }
+        NtfsFs::open(Cursor::new(vol)).unwrap()
+    }
+
+    /// frag.txt's `$ATTRIBUTE_LIST`: its own attributes in record 9 at
+    /// sequence 1, its `$DATA` in record 10 at `data_sequence`.
+    fn frag_list(data_sequence: u16) -> Vec<Vec<u8>> {
+        vec![
+            attrlist_entry_seq(attr_types::STANDARD_INFORMATION, 9, 1),
+            attrlist_entry_seq(attr_types::FILE_NAME, 9, 1),
+            attrlist_entry_seq(attr_types::DATA, 10, data_sequence),
+        ]
+    }
+
+    const IN_USE: u16 = 0x0001;
+    const FREE: u16 = 0x0000;
+
+    fn is_stale(result: &Result<Vec<u8>>) -> bool {
+        matches!(result, Err(NtfsError::BadAttributeList(d)) if *d == "stale extension record reference")
+    }
+
+    fn is_foreign(result: &Result<Vec<u8>>) -> bool {
+        matches!(result, Err(NtfsError::BadAttributeList(d))
+            if *d == "extension record in-use state differs from its base")
+    }
+
+    #[test]
+    fn live_file_rejects_an_extension_reused_at_a_newer_sequence() {
+        // The list names record 10 at sequence 1; record 10 now holds another
+        // file at sequence 2. Its attributes must not be grafted onto frag.txt.
+        let fs = volume_with_frag((IN_USE, 1), &frag_list(1), (IN_USE, 2));
+        assert!(is_stale(&fs.read_data_by_record(9, None, u64::MAX)));
+    }
+
+    #[test]
+    fn live_file_rejects_a_free_extension() {
+        let fs = volume_with_frag((IN_USE, 1), &frag_list(1), (FREE, 1));
+        assert!(is_foreign(&fs.read_data_by_record(9, None, u64::MAX)));
+    }
+
+    #[test]
+    fn every_reference_to_an_extension_is_checked() {
+        // The first reference to record 10 is current, the second is stale.
+        let mut list = frag_list(1);
+        list.push(attrlist_entry_seq(attr_types::DATA, 10, 2));
+        let fs = volume_with_frag((IN_USE, 1), &list, (IN_USE, 1));
+        assert!(is_stale(&fs.read_data_by_record(9, None, u64::MAX)));
+    }
+
+    #[test]
+    fn deleted_file_reads_the_extension_freed_with_it() {
+        // Freeing a record bumps its sequence, skipping zero (ntfs-3g
+        // `ntfs_mft_record_free`), so a deleted file's base and extension both
+        // sit one past the sequence its list recorded. An implementation that
+        // does not bump leaves them at it.
+        for (listed, freed) in [(1, 2), (1, 1), (0xFFFF, 1)] {
+            let fs = volume_with_frag((FREE, freed), &frag_list(listed), (FREE, freed));
+            assert_eq!(
+                fs.read_data_by_record(9, None, u64::MAX).unwrap(),
+                b"fragmented!",
+                "listed at {listed}, freed to {freed}"
+            );
+        }
+    }
+
+    #[test]
+    fn deleted_file_rejects_an_extension_reused_since() {
+        // Reallocated to another file, or reallocated and freed again.
+        let fs = volume_with_frag((FREE, 2), &frag_list(1), (IN_USE, 2));
+        assert!(is_foreign(&fs.read_data_by_record(9, None, u64::MAX)));
+        let fs = volume_with_frag((FREE, 2), &frag_list(1), (FREE, 3));
+        assert!(is_stale(&fs.read_data_by_record(9, None, u64::MAX)));
+    }
+
+    #[test]
+    fn reference_without_a_sequence_is_not_checked() {
+        // A zero sequence means none was recorded (ntfs-3g
+        // `ntfs_file_record_read` checks only a non-zero MSEQNO).
+        let fs = volume_with_frag((IN_USE, 1), &frag_list(0), (IN_USE, 7));
+        assert_eq!(
+            fs.read_data_by_record(9, None, u64::MAX).unwrap(),
+            b"fragmented!"
+        );
+    }
+
+    #[test]
+    fn mft_extension_at_a_newer_sequence_fails_open() {
+        // Record 0's list names extension record 4 at sequence 1; record 4 is at
+        // sequence 2. The sequence sits in the record's first sector, clear of
+        // the fixup tails, so it can be rewritten in place.
+        let mut vol = build_volume_split_mft().into_inner();
+        let o = MFT_LCN as usize * CLUSTER + 4 * REC + 0x10;
+        vol[o..o + 2].copy_from_slice(&2u16.to_le_bytes());
+        assert!(matches!(
+            NtfsFs::open(Cursor::new(vol)),
+            Err(NtfsError::BadAttributeList(d)) if d == "stale extension record reference"
+        ));
     }
 
     /// Build a volume: boot + an MFT with $MFT, root, an inline file, and a
