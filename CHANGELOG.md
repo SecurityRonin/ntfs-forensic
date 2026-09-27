@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `AttributeBody::NonResident` carries `compressed_size: Option<u64>`, and
+  `Attribute::compressed_size()` returns it: the bytes a compressed or sparse
+  stream occupies on disk, read from offset 0x40 when the header is 0x48
+  bytes. `allocated_size` counts whole compression units and overstates it.
+  XP's 0x40-byte compressed header and every uncompressed attribute give
+  `None`. Breaking for code that constructs the variant (#20).
+
 ## [ntfs-core 0.7.1 / ntfs-forensic 0.6.1] — 2026-06-09
 
 ### Docs

@@ -27,6 +27,12 @@ const HEADER_MIN: usize = 0x10;
 const RESIDENT_MIN: usize = 0x18;
 /// Minimum bytes of a non-resident attribute header (through initialized size).
 const NONRESIDENT_MIN: usize = 0x40;
+/// Offset of the compressed size in a non-resident header. Present only in the
+/// 0x48-byte header of a compressed or sparse attribute; not in
+/// [`forensicnomicon::ntfs::attr_offsets`].
+const NR_COMPRESSED_SIZE: usize = 0x40;
+/// Bytes of a non-resident header that carries a compressed size.
+const NONRESIDENT_COMPRESSED_MIN: usize = 0x48;
 /// Hard cap on attributes per record — belt-and-suspenders against crafted input.
 const MAX_ATTRIBUTES: usize = 4096;
 
@@ -68,6 +74,10 @@ pub enum AttributeBody {
         allocated_size: u64,
         real_size: u64,
         initialized_size: u64,
+        /// Bytes the stream occupies on disk, for a compressed or sparse
+        /// attribute whose header carries the field (runlist at 0x48 or later).
+        /// `None` otherwise, including XP's 0x40-byte compressed header.
+        compressed_size: Option<u64>,
     },
 }
 
@@ -88,6 +98,19 @@ impl Attribute {
                 compression_unit, ..
             } => compression_unit,
             AttributeBody::Resident { .. } => 0,
+        }
+    }
+
+    /// The bytes a compressed or sparse stream occupies on disk, which
+    /// `allocated_size` overstates by counting whole compression units. `None`
+    /// for resident attributes and headers without the field.
+    #[must_use]
+    pub fn compressed_size(&self) -> Option<u64> {
+        match self.body {
+            AttributeBody::NonResident {
+                compressed_size, ..
+            } => compressed_size,
+            AttributeBody::Resident { .. } => None,
         }
     }
 
@@ -205,14 +228,28 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
             }
             let u64at = |rel: usize| le_u64(record, pos + rel);
             let u16at = |rel: usize| le_u16(record, pos + rel);
+            let runs_offset = u16at(o::NR_RUNS_OFFSET);
+            // The flags alone do not say the field is there: XP wrote compressed
+            // attributes with a 0x40-byte header, whose 0x40 is the runlist.
+            let compressed_size = if flags & (flag::COMPRESSED | flag::SPARSE) != 0
+                && runs_offset as usize >= NONRESIDENT_COMPRESSED_MIN
+            {
+                if pos + NONRESIDENT_COMPRESSED_MIN > end {
+                    return Err(bad(pos, "compressed size runs past attribute"));
+                }
+                Some(u64at(NR_COMPRESSED_SIZE))
+            } else {
+                None
+            };
             AttributeBody::NonResident {
                 start_vcn: u64at(o::NR_START_VCN),
                 last_vcn: u64at(o::NR_LAST_VCN),
-                runs_offset: u16at(o::NR_RUNS_OFFSET),
+                runs_offset,
                 compression_unit: u16at(o::NR_COMPRESSION_UNIT),
                 allocated_size: u64at(o::NR_ALLOCATED_SIZE),
                 real_size: u64at(o::NR_REAL_SIZE),
                 initialized_size: u64at(o::NR_INITIALIZED_SIZE),
+                compressed_size,
             }
         } else {
             if pos + RESIDENT_MIN > end {
