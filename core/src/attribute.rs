@@ -75,8 +75,10 @@ pub enum AttributeBody {
         real_size: u64,
         initialized_size: u64,
         /// Bytes the stream occupies on disk, for a compressed or sparse
-        /// attribute whose header carries the field (runlist at 0x48 or later).
-        /// `None` otherwise, including XP's 0x40-byte compressed header.
+        /// attribute whose header carries the field (name and runlist at 0x48
+        /// or later). `None` otherwise, including XP's 0x40-byte compressed
+        /// header. Like `allocated_size`, it describes the whole stream only on
+        /// the extent with `start_vcn == 0`; later extents may hold 0.
         compressed_size: Option<u64>,
     },
 }
@@ -103,7 +105,8 @@ impl Attribute {
 
     /// The bytes a compressed or sparse stream occupies on disk, which
     /// `allocated_size` overstates by counting whole compression units. `None`
-    /// for resident attributes and headers without the field.
+    /// for resident attributes and headers without the field. Meaningful for
+    /// the whole stream only on its first extent (`start_vcn == 0`).
     #[must_use]
     pub fn compressed_size(&self) -> Option<u64> {
         match self.body {
@@ -230,9 +233,12 @@ pub fn parse_attributes(record: &[u8], first_attr_offset: usize) -> Result<Vec<A
             let u16at = |rel: usize| le_u16(record, pos + rel);
             let runs_offset = u16at(o::NR_RUNS_OFFSET);
             // The flags alone do not say the field is there: XP wrote compressed
-            // attributes with a 0x40-byte header, whose 0x40 is the runlist.
+            // attributes with a 0x40-byte header, whose 0x40 is the runlist or,
+            // on a named stream, the name. The header ends where the first of
+            // the name and the runlist begins.
             let compressed_size = if flags & (flag::COMPRESSED | flag::SPARSE) != 0
                 && runs_offset as usize >= NONRESIDENT_COMPRESSED_MIN
+                && (name_length == 0 || name_offset >= NONRESIDENT_COMPRESSED_MIN)
             {
                 if pos + NONRESIDENT_COMPRESSED_MIN > end {
                     return Err(bad(pos, "compressed size runs past attribute"));
