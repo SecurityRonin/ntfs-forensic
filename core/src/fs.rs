@@ -7,6 +7,7 @@
 //! [`NtfsFs::read_file`] resolves a path by walking the directory B-tree from
 //! the root (record 5) and reads the file's unnamed `$DATA`.
 
+use std::collections::btree_map::{BTreeMap, Entry};
 use std::io::{Read, Seek, SeekFrom};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 
@@ -16,6 +17,7 @@ use crate::attribute::{parse_attributes, Attribute, AttributeBody};
 use crate::boot::BootSector;
 use crate::data::read_attribute_value;
 use crate::error::{NtfsError, Result};
+use crate::file_name::FileReference;
 use crate::index::{parse_index_buffer, IndexEntry, IndexRoot};
 use crate::record::{apply_fixup, MftRecordHeader};
 use crate::runlist::{self, Run};
@@ -359,9 +361,11 @@ impl<R: Read + Seek> NtfsFs<R> {
     /// The base record plus every distinct extension record referenced by its
     /// `$ATTRIBUTE_LIST` (if any) — so a fragmented file's attributes can be
     /// found wherever the MFT spread them. Cycles are broken by tracking seen
-    /// record numbers.
+    /// record numbers. Every reference is checked with [`check_extension`].
     fn gather_records(&self, base_num: u64, base_record: &[u8]) -> Result<Vec<Vec<u8>>> {
-        let base_attrs = record_attributes(base_record)?;
+        let base_header = MftRecordHeader::parse(base_record)?;
+        let base_attrs =
+            parse_attributes(base_record, base_header.first_attribute_offset as usize)?;
         let mut records = vec![base_record.to_vec()];
 
         if let Some(al) = base_attrs
@@ -376,16 +380,62 @@ impl<R: Read + Seek> NtfsFs<R> {
                 read_attribute_value(&mut *reader, base_record, al, self.boot.cluster_size())?
             };
             let entries = crate::attribute_list::parse(&content)?;
-            let mut seen = std::collections::BTreeSet::new();
-            seen.insert(base_num);
+            let mut extensions = BTreeMap::new();
             for entry in entries {
-                let rn = entry.base_reference.record_number;
-                if seen.insert(rn) {
-                    records.push(self.read_record(rn)?);
+                let reference = entry.base_reference;
+                if reference.record_number == base_num {
+                    continue;
                 }
+                let header = match extensions.entry(reference.record_number) {
+                    Entry::Occupied(seen) => seen.into_mut(),
+                    Entry::Vacant(slot) => {
+                        let record = self.read_record(reference.record_number)?;
+                        let header = MftRecordHeader::parse(&record)?;
+                        records.push(record);
+                        slot.insert(header)
+                    }
+                };
+                check_extension(&base_header, reference, header)?;
             }
         }
         Ok(records)
+    }
+}
+
+/// Check that the extension record an `$ATTRIBUTE_LIST` entry names is still
+/// the one the list was written for, not a record number since reallocated.
+///
+/// A live base needs a live extension at the referenced sequence (ntfs-3g
+/// `ntfs_extent_inode_open`, "stale extent mft reference"). A deleted base's
+/// extensions were freed with it, and freeing bumps a record's sequence,
+/// skipping zero (ntfs-3g `ntfs_mft_record_free`), so a free extension at the
+/// referenced sequence or one past it still belongs to the base. A zero
+/// sequence in the reference is not checked, as in ntfs-3g
+/// `ntfs_file_record_read`.
+///
+/// # Errors
+///
+/// [`NtfsError::BadAttributeList`] when the extension's in-use state differs
+/// from the base's, or its sequence does not match the reference.
+fn check_extension(
+    base: &MftRecordHeader,
+    reference: FileReference,
+    extension: &MftRecordHeader,
+) -> Result<()> {
+    if extension.is_in_use() != base.is_in_use() {
+        return Err(NtfsError::BadAttributeList(
+            "extension record in-use state differs from its base",
+        ));
+    }
+    let listed = reference.sequence;
+    let current = extension.sequence_number;
+    let freed = if listed == u16::MAX { 1 } else { listed + 1 };
+    if listed == 0 || current == listed || (!base.is_in_use() && current == freed) {
+        Ok(())
+    } else {
+        Err(NtfsError::BadAttributeList(
+            "stale extension record reference",
+        ))
     }
 }
 
@@ -415,7 +465,8 @@ fn bootstrap_mft_runs<R: Read + Seek>(
     boot: &BootSector,
 ) -> Result<Vec<Run>> {
     let mut runs = mft_data_runs(rec0)?; // first fragment (VCN 0), resident in record 0
-    let attrs = record_attributes(rec0)?;
+    let rec0_header = MftRecordHeader::parse(rec0)?;
+    let attrs = parse_attributes(rec0, rec0_header.first_attribute_offset as usize)?;
     let Some(al) = attrs
         .iter()
         .find(|a| a.type_code == attr_types::ATTRIBUTE_LIST)
@@ -429,27 +480,34 @@ fn bootstrap_mft_runs<R: Read + Seek>(
     // is record 0's, already folded in), visited once each in VCN order so each
     // is covered by the runs assembled before it.
     let rec_size = boot.mft_record_size;
-    let mut ext_records: Vec<(u64, u64)> = entries
+    let mut ext_records: Vec<(u64, FileReference)> = entries
         .iter()
         .filter(|e| e.type_code == attr_types::DATA && e.name.is_none() && e.start_vcn != 0)
-        .map(|e| (e.start_vcn, e.base_reference.record_number))
+        .map(|e| (e.start_vcn, e.base_reference))
         .collect();
     ext_records.sort_by_key(|&(start_vcn, _)| start_vcn);
 
     // One extension record may hold several $DATA fragments, so collect every
     // unnamed non-resident $DATA found, then concatenate all fragments by VCN.
     let mut frags: Vec<(u64, Vec<Run>)> = Vec::new();
-    let mut seen = std::collections::BTreeSet::new();
-    for (_, rn) in ext_records {
-        if !seen.insert(rn) {
-            continue; // same extension record named for two VCNs: already read
+    let mut seen = BTreeMap::new();
+    for (_, reference) in ext_records {
+        let rn = reference.record_number;
+        if let Some(header) = seen.get(&rn) {
+            // Same extension record named for two VCNs: already read.
+            check_extension(&rec0_header, reference, header)?;
+            continue;
         }
         let virt = rn
             .checked_mul(rec_size)
             .ok_or(NtfsError::BadRunlist("record offset overflow"))?;
         let mut ext = read_virtual(reader, &runs, boot.cluster_size(), virt, rec_size)?;
         apply_fixup(&mut ext, boot.bytes_per_sector as usize)?;
-        for a in record_attributes(&ext)? {
+        let header = MftRecordHeader::parse(&ext)?;
+        check_extension(&rec0_header, reference, &header)?;
+        let first_attribute = header.first_attribute_offset as usize;
+        seen.insert(rn, header);
+        for a in parse_attributes(&ext, first_attribute)? {
             let AttributeBody::NonResident { start_vcn, .. } = a.body else {
                 continue;
             };
