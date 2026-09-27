@@ -522,6 +522,61 @@ mod tests {
     }
 
     #[test]
+    fn named_compressed_attribute_with_short_header_has_no_compressed_size() {
+        // XP's 0x40-byte header on a named stream: the name sits at 0x40 and
+        // pushes the runlist to 0x48, so 0x40 holds name bytes, not a size.
+        for flags in [flag::COMPRESSED, flag::SPARSE] {
+            let runs = [0x21u8, 0x08, 0x00, 0x10, 0x00];
+            let attr = nonresident(
+                attr_types::DATA,
+                Some("$Bad"),
+                flags,
+                0,
+                7,
+                0x8000,
+                0x7A00,
+                0x7A00,
+                &runs,
+            );
+            let rec = record_with(0x38, &[attr]);
+            let attrs = parse_attributes(&rec, 0x38).unwrap();
+            assert!(matches!(
+                attrs[0].body,
+                AttributeBody::NonResident {
+                    runs_offset: 0x48,
+                    ..
+                }
+            ));
+            assert_eq!(attrs[0].compressed_size(), None, "flags {flags:#06x}");
+        }
+    }
+
+    #[test]
+    fn named_compressed_attribute_with_long_header_reports_compressed_size() {
+        // Windows' 0x48-byte header on a named stream: the name follows the
+        // compressed size, so the name starts at 0x48 and the field is there.
+        let mut attr = nonresident_with_header(0x48, flag::COMPRESSED, 4, 0x3000);
+        let name: Vec<u16> = "ads".encode_utf16().collect();
+        let runs_at = align8(0x48 + name.len() * 2);
+        let runs = [0x21u8, 0x10, 0x00, 0x10, 0x00];
+        let length = align8(runs_at + runs.len());
+        attr.resize(length, 0);
+        attr[0x48..].fill(0);
+        for (i, ch) in name.iter().enumerate() {
+            attr[0x48 + i * 2..0x48 + i * 2 + 2].copy_from_slice(&ch.to_le_bytes());
+        }
+        attr[runs_at..runs_at + runs.len()].copy_from_slice(&runs);
+        attr[o::LENGTH..o::LENGTH + 4].copy_from_slice(&(length as u32).to_le_bytes());
+        attr[o::NAME_LENGTH] = name.len() as u8;
+        attr[o::NR_RUNS_OFFSET..o::NR_RUNS_OFFSET + 2]
+            .copy_from_slice(&(runs_at as u16).to_le_bytes());
+        let rec = record_with(0x38, &[attr]);
+        let attrs = parse_attributes(&rec, 0x38).unwrap();
+        assert_eq!(attrs[0].name.as_deref(), Some("ads"));
+        assert_eq!(attrs[0].compressed_size(), Some(0x3000));
+    }
+
+    #[test]
     fn resident_attribute_has_no_compressed_size() {
         let attr = resident(attr_types::DATA, None, flag::COMPRESSED, b"inline");
         let rec = record_with(0x38, &[attr]);
