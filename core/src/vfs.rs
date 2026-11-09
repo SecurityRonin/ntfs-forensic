@@ -791,9 +791,10 @@ impl<R: Read + Seek + Send> FileSystem for NtfsFs<R> {
         let mut target = reparse_target(&rec, &attrs)
             .unwrap_or_default()
             .into_bytes();
-        // Both name fields of a reparse buffer are image-controlled u16s, so a
-        // hostile symlink must not allocate past what the caller asked for
-        // (matches the ext4/xfs/ufs/btrfs/zfs adapters).
+        // The target is decoded only from a resident attribute, i.e. from bytes
+        // of this one MFT record (at most 1 MiB, the boot sector's validated
+        // record-size ceiling); the image-controlled u16 name fields cannot reach
+        // past it. `cap` bounds what is returned, not that read.
         target.truncate(cap);
         Ok(target)
     }
