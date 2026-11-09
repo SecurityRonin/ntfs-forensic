@@ -51,7 +51,10 @@ vfs = ["dep:forensic-vfs"]
 mft = { workspace = true }
 # Extract the committed real NTFS partition (`partition.dd`) from the deflated
 # LogFileParser sample zip for the vfs FileSystem-trait test. Deflate only.
-zip = { version = "2", default-features = false, features = ["deflate"] }
+# zip >= 9: 2.x carries RUSTSEC-2026-0367/0368/0369/0429 (extraction paths).
+# Dev-only, so it does not move the library floor; CI's MSRV job builds the
+# library only (msrv-check: build), as zip 9 itself needs Rust 1.88.
+zip = { version = "9", default-features = false, features = ["deflate"] }
 
 [lints]
 workspace = true

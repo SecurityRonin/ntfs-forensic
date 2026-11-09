@@ -74,6 +74,11 @@ criteria = "safe-to-deploy"
 version = "1.0.4"
 criteria = "safe-to-deploy"
 
+[[exemptions.cfg_aliases]]
+version = "0.2.2"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
+
 [[exemptions.chrono]]
 version = "0.4.45"
 criteria = "safe-to-deploy"
@@ -97,6 +102,11 @@ criteria = "safe-to-run"
 [[exemptions.console]]
 version = "0.16.4"
 criteria = "safe-to-run"
+
+[[exemptions.constant_time_eq]]
+version = "0.6.1"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
 
 [[exemptions.crc32fast]]
 version = "1.5.0"
@@ -281,6 +291,11 @@ criteria = "safe-to-run"
 [[exemptions.munge_macro]]
 version = "0.4.7"
 criteria = "safe-to-run"
+
+[[exemptions.nix]]
+version = "0.31.3"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
 
 [[exemptions.num-conv]]
 version = "0.2.2"
@@ -482,6 +497,11 @@ criteria = "safe-to-run"
 version = "1.12.0"
 criteria = "safe-to-run"
 
+[[exemptions.typed-path]]
+version = "0.13.0"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
+
 [[exemptions.unicode-ident]]
 version = "1.0.24"
 criteria = "safe-to-deploy"
@@ -557,6 +577,21 @@ criteria = "safe-to-run"
 [[exemptions.zeroize]]
 version = "1.9.0"
 criteria = "safe-to-run"
+
+[[exemptions.zeroize_derive]]
+version = "1.5.0"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
+
+[[exemptions.zip]]
+version = "9.5.0"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
+
+[[exemptions.zlib-rs]]
+version = "0.6.8"
+criteria = "safe-to-run"
+notes = "test-only: reached solely through the zip 9 dev-dependency (ntfs-core tests unpack committed fixture zips); not shipped. Unreviewed."
 
 [[exemptions.zmij]]
 version = "1.0.23"
