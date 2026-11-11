@@ -3,6 +3,10 @@
 //!
 //! These are pure analyses over already-parsed structures, so they are exact
 //! and side-effect free.
+//!
+//! Several public types carry `ntfs_core` types (`UsnRecord`, `UsnReason`,
+//! …), so `ntfs-core` is a public dependency: an incompatible `ntfs-core`
+//! changes this crate's API as well.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
 
