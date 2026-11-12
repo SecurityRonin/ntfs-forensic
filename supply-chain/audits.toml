@@ -27,6 +27,12 @@ user-id = 347968 # Albert Hui (h4x0r)
 start = "2026-06-28"
 end = "2027-08-01"
 
+[[trusted.rustix]]
+criteria = "safe-to-deploy"
+user-id = 6825 # Dan Gohman (sunfishcode)
+start = "2021-10-29"
+end = "2027-11-12"
+
 [[trusted.safe-read]]
 criteria = "safe-to-deploy"
 user-id = 347968 # Albert Hui (h4x0r)
